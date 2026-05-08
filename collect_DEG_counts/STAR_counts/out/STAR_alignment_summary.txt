@@ -1,0 +1,1688 @@
+
+========================================
+Sample: 0_1_Ha_NC
+Host: Sunflower
+Isolate: NC
+Timepoint: 0h
+========================================
+Total Input Reads:          35633968
+Uniquely Mapped Reads:      32672813 (91.69%)
+Multi-mapped Reads:         7.87%
+Unmapped (too short):       0.38%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 0_2_Ha_NC
+Host: Sunflower
+Isolate: NC
+Timepoint: 0h
+========================================
+Total Input Reads:          35170197
+Uniquely Mapped Reads:      32278620 (91.78%)
+Multi-mapped Reads:         7.81%
+Unmapped (too short):       0.35%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 0_3_Ha_NC
+Host: Sunflower
+Isolate: NC
+Timepoint: 0h
+========================================
+Total Input Reads:          33296290
+Uniquely Mapped Reads:      30440453 (91.42%)
+Multi-mapped Reads:         8.03%
+Unmapped (too short):       0.46%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 0_4_Ha_NC
+Host: Sunflower
+Isolate: NC
+Timepoint: 0h
+========================================
+Total Input Reads:          27552596
+Uniquely Mapped Reads:      25264635 (91.70%)
+Multi-mapped Reads:         7.86%
+Unmapped (too short):       0.38%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_1_Ha_BN172
+Host: Sunflower
+Isolate: BN172
+Timepoint: 24h
+========================================
+Total Input Reads:          24681641
+Uniquely Mapped Reads:      22493940 (91.14%)
+Multi-mapped Reads:         8.11%
+Unmapped (too short):       0.65%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_1_Ha_JS659
+Host: Sunflower
+Isolate: JS659
+Timepoint: 24h
+========================================
+Total Input Reads:          37916350
+Uniquely Mapped Reads:      35040775 (92.42%)
+Multi-mapped Reads:         7.36%
+Unmapped (too short):       0.20%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_1_Ha_MNSS6
+Host: Sunflower
+Isolate: MNSS6
+Timepoint: 24h
+========================================
+Total Input Reads:          43525606
+Uniquely Mapped Reads:      40253529 (92.48%)
+Multi-mapped Reads:         7.29%
+Unmapped (too short):       0.21%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_1_Ha_SSPotter
+Host: Sunflower
+Isolate: SSPotter
+Timepoint: 24h
+========================================
+Total Input Reads:          35423216
+Uniquely Mapped Reads:      32782397 (92.54%)
+Multi-mapped Reads:         7.22%
+Unmapped (too short):       0.21%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_1_Ha_WISS47
+Host: Sunflower
+Isolate: WISS47
+Timepoint: 24h
+========================================
+Total Input Reads:          37433816
+Uniquely Mapped Reads:      34777637 (92.90%)
+Multi-mapped Reads:         6.83%
+Unmapped (too short):       0.25%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_1_Ha_Xtra7
+Host: Sunflower
+Isolate: Xtra7
+Timepoint: 24h
+========================================
+Total Input Reads:          36969986
+Uniquely Mapped Reads:      34165467 (92.41%)
+Multi-mapped Reads:         7.35%
+Unmapped (too short):       0.21%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_2_Ha_BN172
+Host: Sunflower
+Isolate: BN172
+Timepoint: 24h
+========================================
+Total Input Reads:          28707972
+Uniquely Mapped Reads:      25562371 (89.04%)
+Multi-mapped Reads:         9.33%
+Unmapped (too short):       1.25%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_2_Ha_JS659
+Host: Sunflower
+Isolate: JS659
+Timepoint: 24h
+========================================
+Total Input Reads:          33390243
+Uniquely Mapped Reads:      30844596 (92.38%)
+Multi-mapped Reads:         7.38%
+Unmapped (too short):       0.22%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_2_Ha_MNSS6
+Host: Sunflower
+Isolate: MNSS6
+Timepoint: 24h
+========================================
+Total Input Reads:          40484040
+Uniquely Mapped Reads:      37449523 (92.50%)
+Multi-mapped Reads:         7.27%
+Unmapped (too short):       0.20%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_2_Ha_SSPotter
+Host: Sunflower
+Isolate: SSPotter
+Timepoint: 24h
+========================================
+Total Input Reads:          40148806
+Uniquely Mapped Reads:      37182781 (92.61%)
+Multi-mapped Reads:         7.18%
+Unmapped (too short):       0.19%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_2_Ha_WISS47
+Host: Sunflower
+Isolate: WISS47
+Timepoint: 24h
+========================================
+Total Input Reads:          38476450
+Uniquely Mapped Reads:      35799384 (93.04%)
+Multi-mapped Reads:         6.71%
+Unmapped (too short):       0.23%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_3_Ha_BN172
+Host: Sunflower
+Isolate: BN172
+Timepoint: 24h
+========================================
+Total Input Reads:          38575052
+Uniquely Mapped Reads:      35545854 (92.15%)
+Multi-mapped Reads:         7.47%
+Unmapped (too short):       0.33%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_3_Ha_JS659
+Host: Sunflower
+Isolate: JS659
+Timepoint: 24h
+========================================
+Total Input Reads:          40975637
+Uniquely Mapped Reads:      37970085 (92.67%)
+Multi-mapped Reads:         7.13%
+Unmapped (too short):       0.18%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_3_Ha_MNSS6
+Host: Sunflower
+Isolate: MNSS6
+Timepoint: 24h
+========================================
+Total Input Reads:          30582926
+Uniquely Mapped Reads:      28212567 (92.25%)
+Multi-mapped Reads:         7.44%
+Unmapped (too short):       0.27%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_3_Ha_SSPotter
+Host: Sunflower
+Isolate: SSPotter
+Timepoint: 24h
+========================================
+Total Input Reads:          37786679
+Uniquely Mapped Reads:      34897195 (92.35%)
+Multi-mapped Reads:         7.35%
+Unmapped (too short):       0.26%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_3_Ha_WISS47
+Host: Sunflower
+Isolate: WISS47
+Timepoint: 24h
+========================================
+Total Input Reads:          38644508
+Uniquely Mapped Reads:      35832409 (92.72%)
+Multi-mapped Reads:         6.98%
+Unmapped (too short):       0.28%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_3_Ha_Xtra7
+Host: Sunflower
+Isolate: Xtra7
+Timepoint: 24h
+========================================
+Total Input Reads:          36309792
+Uniquely Mapped Reads:      33552005 (92.40%)
+Multi-mapped Reads:         7.35%
+Unmapped (too short):       0.22%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_1_Ha_BN172
+Host: Sunflower
+Isolate: BN172
+Timepoint: 48h
+========================================
+Total Input Reads:          37140940
+Uniquely Mapped Reads:      34311545 (92.38%)
+Multi-mapped Reads:         7.38%
+Unmapped (too short):       0.21%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_1_Ha_JS659
+Host: Sunflower
+Isolate: JS659
+Timepoint: 48h
+========================================
+Total Input Reads:          39236191
+Uniquely Mapped Reads:      36432457 (92.85%)
+Multi-mapped Reads:         6.97%
+Unmapped (too short):       0.16%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_1_Ha_SSPotter
+Host: Sunflower
+Isolate: SSPotter
+Timepoint: 48h
+========================================
+Total Input Reads:          43620990
+Uniquely Mapped Reads:      40351886 (92.51%)
+Multi-mapped Reads:         7.19%
+Unmapped (too short):       0.27%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_1_Ha_WISS47
+Host: Sunflower
+Isolate: WISS47
+Timepoint: 48h
+========================================
+Total Input Reads:          34718094
+Uniquely Mapped Reads:      31863869 (91.78%)
+Multi-mapped Reads:         7.85%
+Unmapped (too short):       0.32%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_1_Ha_Xtra7
+Host: Sunflower
+Isolate: Xtra7
+Timepoint: 48h
+========================================
+Total Input Reads:          45922059
+Uniquely Mapped Reads:      42417006 (92.37%)
+Multi-mapped Reads:         7.41%
+Unmapped (too short):       0.20%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_2_Ha_BN172
+Host: Sunflower
+Isolate: BN172
+Timepoint: 48h
+========================================
+Total Input Reads:          36478864
+Uniquely Mapped Reads:      32792740 (89.90%)
+Multi-mapped Reads:         8.96%
+Unmapped (too short):       0.89%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_2_Ha_JS659
+Host: Sunflower
+Isolate: JS659
+Timepoint: 48h
+========================================
+Total Input Reads:          39851377
+Uniquely Mapped Reads:      36931339 (92.67%)
+Multi-mapped Reads:         7.14%
+Unmapped (too short):       0.17%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_2_Ha_MNSS6
+Host: Sunflower
+Isolate: MNSS6
+Timepoint: 48h
+========================================
+Total Input Reads:          47727863
+Uniquely Mapped Reads:      44183484 (92.57%)
+Multi-mapped Reads:         7.18%
+Unmapped (too short):       0.22%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_2_Ha_SSPotter
+Host: Sunflower
+Isolate: SSPotter
+Timepoint: 48h
+========================================
+Total Input Reads:          33403356
+Uniquely Mapped Reads:      30934366 (92.61%)
+Multi-mapped Reads:         7.16%
+Unmapped (too short):       0.20%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_2_Ha_WISS47
+Host: Sunflower
+Isolate: WISS47
+Timepoint: 48h
+========================================
+Total Input Reads:          47454457
+Uniquely Mapped Reads:      43725556 (92.14%)
+Multi-mapped Reads:         7.61%
+Unmapped (too short):       0.22%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_2_Ha_Xtra7
+Host: Sunflower
+Isolate: Xtra7
+Timepoint: 48h
+========================================
+Total Input Reads:          38072211
+Uniquely Mapped Reads:      35130998 (92.27%)
+Multi-mapped Reads:         7.48%
+Unmapped (too short):       0.22%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_3_Ha_BN172
+Host: Sunflower
+Isolate: BN172
+Timepoint: 48h
+========================================
+Total Input Reads:          37673216
+Uniquely Mapped Reads:      34765405 (92.28%)
+Multi-mapped Reads:         7.46%
+Unmapped (too short):       0.23%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_3_Ha_JS659
+Host: Sunflower
+Isolate: JS659
+Timepoint: 48h
+========================================
+Total Input Reads:          39443413
+Uniquely Mapped Reads:      36519902 (92.59%)
+Multi-mapped Reads:         7.18%
+Unmapped (too short):       0.20%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_3_Ha_MNSS6
+Host: Sunflower
+Isolate: MNSS6
+Timepoint: 48h
+========================================
+Total Input Reads:          36456501
+Uniquely Mapped Reads:      33716288 (92.48%)
+Multi-mapped Reads:         7.25%
+Unmapped (too short):       0.24%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_3_Ha_SSPotter
+Host: Sunflower
+Isolate: SSPotter
+Timepoint: 48h
+========================================
+Total Input Reads:          30895262
+Uniquely Mapped Reads:      28780016 (93.15%)
+Multi-mapped Reads:         6.68%
+Unmapped (too short):       0.15%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_3_Ha_WISS47
+Host: Sunflower
+Isolate: WISS47
+Timepoint: 48h
+========================================
+Total Input Reads:          40449380
+Uniquely Mapped Reads:      37308259 (92.23%)
+Multi-mapped Reads:         7.54%
+Unmapped (too short):       0.20%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_3_Ha_Xtra7
+Host: Sunflower
+Isolate: Xtra7
+Timepoint: 48h
+========================================
+Total Input Reads:          31926228
+Uniquely Mapped Reads:      29726978 (93.11%)
+Multi-mapped Reads:         6.77%
+Unmapped (too short):       0.09%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_1_Ha_BN172
+Host: Sunflower
+Isolate: BN172
+Timepoint: 96h
+========================================
+Total Input Reads:          34855317
+Uniquely Mapped Reads:      31943562 (91.65%)
+Multi-mapped Reads:         7.97%
+Unmapped (too short):       0.35%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_1_Ha_JS659
+Host: Sunflower
+Isolate: JS659
+Timepoint: 96h
+========================================
+Total Input Reads:          38287396
+Uniquely Mapped Reads:      35451689 (92.59%)
+Multi-mapped Reads:         7.17%
+Unmapped (too short):       0.21%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_1_Ha_MNSS6
+Host: Sunflower
+Isolate: MNSS6
+Timepoint: 96h
+========================================
+Total Input Reads:          34240133
+Uniquely Mapped Reads:      31353425 (91.57%)
+Multi-mapped Reads:         8.00%
+Unmapped (too short):       0.39%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_1_Ha_SSPotter
+Host: Sunflower
+Isolate: SSPotter
+Timepoint: 96h
+========================================
+Total Input Reads:          40571182
+Uniquely Mapped Reads:      37243866 (91.80%)
+Multi-mapped Reads:         7.67%
+Unmapped (too short):       0.48%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_1_Ha_WISS47
+Host: Sunflower
+Isolate: WISS47
+Timepoint: 96h
+========================================
+Total Input Reads:          28255909
+Uniquely Mapped Reads:      26158118 (92.58%)
+Multi-mapped Reads:         7.11%
+Unmapped (too short):       0.27%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_1_Ha_Xtra7
+Host: Sunflower
+Isolate: Xtra7
+Timepoint: 96h
+========================================
+Total Input Reads:          36995057
+Uniquely Mapped Reads:      34153509 (92.32%)
+Multi-mapped Reads:         7.46%
+Unmapped (too short):       0.20%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_2_Ha_BN172
+Host: Sunflower
+Isolate: BN172
+Timepoint: 96h
+========================================
+Total Input Reads:          32086909
+Uniquely Mapped Reads:      29478362 (91.87%)
+Multi-mapped Reads:         7.84%
+Unmapped (too short):       0.26%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_2_Ha_JS659
+Host: Sunflower
+Isolate: JS659
+Timepoint: 96h
+========================================
+Total Input Reads:          32598793
+Uniquely Mapped Reads:      30216173 (92.69%)
+Multi-mapped Reads:         7.07%
+Unmapped (too short):       0.21%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_2_Ha_MNSS6
+Host: Sunflower
+Isolate: MNSS6
+Timepoint: 96h
+========================================
+Total Input Reads:          40799638
+Uniquely Mapped Reads:      37363915 (91.58%)
+Multi-mapped Reads:         7.99%
+Unmapped (too short):       0.38%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_2_Ha_SSPotter
+Host: Sunflower
+Isolate: SSPotter
+Timepoint: 96h
+========================================
+Total Input Reads:          40977043
+Uniquely Mapped Reads:      37713629 (92.04%)
+Multi-mapped Reads:         7.57%
+Unmapped (too short):       0.35%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_2_Ha_WISS47
+Host: Sunflower
+Isolate: WISS47
+Timepoint: 96h
+========================================
+Total Input Reads:          33203908
+Uniquely Mapped Reads:      30611239 (92.19%)
+Multi-mapped Reads:         7.37%
+Unmapped (too short):       0.39%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_2_Ha_Xtra7
+Host: Sunflower
+Isolate: Xtra7
+Timepoint: 96h
+========================================
+Total Input Reads:          39374911
+Uniquely Mapped Reads:      36352541 (92.32%)
+Multi-mapped Reads:         7.47%
+Unmapped (too short):       0.19%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_3_Ha_BN172
+Host: Sunflower
+Isolate: BN172
+Timepoint: 96h
+========================================
+Total Input Reads:          32017147
+Uniquely Mapped Reads:      29335363 (91.62%)
+Multi-mapped Reads:         8.01%
+Unmapped (too short):       0.32%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_3_Ha_JS659
+Host: Sunflower
+Isolate: JS659
+Timepoint: 96h
+========================================
+Total Input Reads:          34718617
+Uniquely Mapped Reads:      32170659 (92.66%)
+Multi-mapped Reads:         7.11%
+Unmapped (too short):       0.20%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_3_Ha_MNSS6
+Host: Sunflower
+Isolate: MNSS6
+Timepoint: 96h
+========================================
+Total Input Reads:          39750054
+Uniquely Mapped Reads:      36427835 (91.64%)
+Multi-mapped Reads:         7.94%
+Unmapped (too short):       0.37%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_3_Ha_SSPotter
+Host: Sunflower
+Isolate: SSPotter
+Timepoint: 96h
+========================================
+Total Input Reads:          36126244
+Uniquely Mapped Reads:      33216504 (91.95%)
+Multi-mapped Reads:         7.67%
+Unmapped (too short):       0.35%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_3_Ha_WISS47
+Host: Sunflower
+Isolate: WISS47
+Timepoint: 96h
+========================================
+Total Input Reads:          35752730
+Uniquely Mapped Reads:      32888435 (91.99%)
+Multi-mapped Reads:         7.48%
+Unmapped (too short):       0.45%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_3_Ha_Xtra7
+Host: Sunflower
+Isolate: Xtra7
+Timepoint: 96h
+========================================
+Total Input Reads:          29549683
+Uniquely Mapped Reads:      27260294 (92.25%)
+Multi-mapped Reads:         7.53%
+Unmapped (too short):       0.20%
+Unmapped (other):           0.00%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 0_1_Gm_NC
+Host: Soybean
+Isolate: NC
+Timepoint: 0h
+========================================
+Total Input Reads:          34409027
+Uniquely Mapped Reads:      32172782 (93.50%)
+Multi-mapped Reads:         6.32%
+Unmapped (too short):       0.02%
+Unmapped (other):           0.13%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 0_2_Gm_NC
+Host: Soybean
+Isolate: NC
+Timepoint: 0h
+========================================
+Total Input Reads:          33499826
+Uniquely Mapped Reads:      31343392 (93.56%)
+Multi-mapped Reads:         6.27%
+Unmapped (too short):       0.02%
+Unmapped (other):           0.12%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 0_3_Gm_NC
+Host: Soybean
+Isolate: NC
+Timepoint: 0h
+========================================
+Total Input Reads:          34227439
+Uniquely Mapped Reads:      31774544 (92.83%)
+Multi-mapped Reads:         6.76%
+Unmapped (too short):       0.02%
+Unmapped (other):           0.31%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 0_5_Gm_NC
+Host: Soybean
+Isolate: NC
+Timepoint: 0h
+========================================
+Total Input Reads:          35992044
+Uniquely Mapped Reads:      33686255 (93.59%)
+Multi-mapped Reads:         6.34%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.03%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_1_Gm_BN172
+Host: Soybean
+Isolate: BN172
+Timepoint: 24h
+========================================
+Total Input Reads:          39126521
+Uniquely Mapped Reads:      36713920 (93.83%)
+Multi-mapped Reads:         5.97%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.13%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_1_Gm_JS659
+Host: Soybean
+Isolate: JS659
+Timepoint: 24h
+========================================
+Total Input Reads:          40890507
+Uniquely Mapped Reads:      38055754 (93.07%)
+Multi-mapped Reads:         6.72%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.15%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_1_Gm_MNSS6
+Host: Soybean
+Isolate: MNSS6
+Timepoint: 24h
+========================================
+Total Input Reads:          38573057
+Uniquely Mapped Reads:      35912784 (93.10%)
+Multi-mapped Reads:         6.72%
+Unmapped (too short):       0.04%
+Unmapped (other):           0.11%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_1_Gm_SSPotter
+Host: Soybean
+Isolate: SSPotter
+Timepoint: 24h
+========================================
+Total Input Reads:          37081769
+Uniquely Mapped Reads:      34759151 (93.74%)
+Multi-mapped Reads:         6.09%
+Unmapped (too short):       0.02%
+Unmapped (other):           0.12%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_1_Gm_WISS47
+Host: Soybean
+Isolate: WISS47
+Timepoint: 24h
+========================================
+Total Input Reads:          39630329
+Uniquely Mapped Reads:      36834519 (92.95%)
+Multi-mapped Reads:         6.73%
+Unmapped (too short):       0.14%
+Unmapped (other):           0.14%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_1_Gm_Xtra7
+Host: Soybean
+Isolate: Xtra7
+Timepoint: 24h
+========================================
+Total Input Reads:          39374999
+Uniquely Mapped Reads:      36725547 (93.27%)
+Multi-mapped Reads:         6.52%
+Unmapped (too short):       0.02%
+Unmapped (other):           0.15%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_2_Gm_BN172
+Host: Soybean
+Isolate: BN172
+Timepoint: 24h
+========================================
+Total Input Reads:          37572307
+Uniquely Mapped Reads:      35227291 (93.76%)
+Multi-mapped Reads:         6.03%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.15%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_2_Gm_JS659
+Host: Soybean
+Isolate: JS659
+Timepoint: 24h
+========================================
+Total Input Reads:          45609735
+Uniquely Mapped Reads:      42406486 (92.98%)
+Multi-mapped Reads:         6.77%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.18%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_2_Gm_MNSS6
+Host: Soybean
+Isolate: MNSS6
+Timepoint: 24h
+========================================
+Total Input Reads:          39099052
+Uniquely Mapped Reads:      36433228 (93.18%)
+Multi-mapped Reads:         6.66%
+Unmapped (too short):       0.04%
+Unmapped (other):           0.10%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_2_Gm_SSPotter
+Host: Soybean
+Isolate: SSPotter
+Timepoint: 24h
+========================================
+Total Input Reads:          37791984
+Uniquely Mapped Reads:      35416488 (93.71%)
+Multi-mapped Reads:         6.12%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.11%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_2_Gm_WISS47
+Host: Soybean
+Isolate: WISS47
+Timepoint: 24h
+========================================
+Total Input Reads:          39225002
+Uniquely Mapped Reads:      36465669 (92.97%)
+Multi-mapped Reads:         6.70%
+Unmapped (too short):       0.15%
+Unmapped (other):           0.14%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_2_Gm_Xtra7
+Host: Soybean
+Isolate: Xtra7
+Timepoint: 24h
+========================================
+Total Input Reads:          40684872
+Uniquely Mapped Reads:      37905667 (93.17%)
+Multi-mapped Reads:         6.59%
+Unmapped (too short):       0.02%
+Unmapped (other):           0.17%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_3_Gm_BN172
+Host: Soybean
+Isolate: BN172
+Timepoint: 24h
+========================================
+Total Input Reads:          43625666
+Uniquely Mapped Reads:      40878918 (93.70%)
+Multi-mapped Reads:         6.04%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.19%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_3_Gm_JS659
+Host: Soybean
+Isolate: JS659
+Timepoint: 24h
+========================================
+Total Input Reads:          38525345
+Uniquely Mapped Reads:      35941831 (93.29%)
+Multi-mapped Reads:         6.54%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.11%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_3_Gm_MNSS6
+Host: Soybean
+Isolate: MNSS6
+Timepoint: 24h
+========================================
+Total Input Reads:          39203035
+Uniquely Mapped Reads:      36425851 (92.92%)
+Multi-mapped Reads:         6.84%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.17%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_3_Gm_SSPotter
+Host: Soybean
+Isolate: SSPotter
+Timepoint: 24h
+========================================
+Total Input Reads:          38468823
+Uniquely Mapped Reads:      36002795 (93.59%)
+Multi-mapped Reads:         6.23%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.12%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_3_Gm_WISS47
+Host: Soybean
+Isolate: WISS47
+Timepoint: 24h
+========================================
+Total Input Reads:          38474189
+Uniquely Mapped Reads:      35713232 (92.82%)
+Multi-mapped Reads:         6.80%
+Unmapped (too short):       0.15%
+Unmapped (other):           0.18%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 24_3_Gm_Xtra7
+Host: Soybean
+Isolate: Xtra7
+Timepoint: 24h
+========================================
+Total Input Reads:          38605436
+Uniquely Mapped Reads:      35958927 (93.14%)
+Multi-mapped Reads:         6.62%
+Unmapped (too short):       0.02%
+Unmapped (other):           0.17%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_1_Gm_BN172
+Host: Soybean
+Isolate: BN172
+Timepoint: 48h
+========================================
+Total Input Reads:          34861189
+Uniquely Mapped Reads:      32650081 (93.66%)
+Multi-mapped Reads:         6.10%
+Unmapped (too short):       0.05%
+Unmapped (other):           0.15%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_1_Gm_JS659
+Host: Soybean
+Isolate: JS659
+Timepoint: 48h
+========================================
+Total Input Reads:          43156053
+Uniquely Mapped Reads:      40179447 (93.10%)
+Multi-mapped Reads:         6.67%
+Unmapped (too short):       0.05%
+Unmapped (other):           0.14%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_1_Gm_MNSS6
+Host: Soybean
+Isolate: MNSS6
+Timepoint: 48h
+========================================
+Total Input Reads:          36371694
+Uniquely Mapped Reads:      33967916 (93.39%)
+Multi-mapped Reads:         6.34%
+Unmapped (too short):       0.07%
+Unmapped (other):           0.17%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_1_Gm_SSPotter
+Host: Soybean
+Isolate: SSPotter
+Timepoint: 48h
+========================================
+Total Input Reads:          34138947
+Uniquely Mapped Reads:      31959570 (93.62%)
+Multi-mapped Reads:         6.12%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.18%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_1_Gm_WISS47
+Host: Soybean
+Isolate: WISS47
+Timepoint: 48h
+========================================
+Total Input Reads:          35656749
+Uniquely Mapped Reads:      33076064 (92.76%)
+Multi-mapped Reads:         6.93%
+Unmapped (too short):       0.17%
+Unmapped (other):           0.10%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_1_Gm_Xtra7
+Host: Soybean
+Isolate: Xtra7
+Timepoint: 48h
+========================================
+Total Input Reads:          33661196
+Uniquely Mapped Reads:      31487241 (93.54%)
+Multi-mapped Reads:         6.23%
+Unmapped (too short):       0.10%
+Unmapped (other):           0.11%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_2_Gm_BN172
+Host: Soybean
+Isolate: BN172
+Timepoint: 48h
+========================================
+Total Input Reads:          36348302
+Uniquely Mapped Reads:      33962346 (93.44%)
+Multi-mapped Reads:         6.29%
+Unmapped (too short):       0.04%
+Unmapped (other):           0.19%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_2_Gm_JS659
+Host: Soybean
+Isolate: JS659
+Timepoint: 48h
+========================================
+Total Input Reads:          38102267
+Uniquely Mapped Reads:      35490688 (93.15%)
+Multi-mapped Reads:         6.60%
+Unmapped (too short):       0.05%
+Unmapped (other):           0.16%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_2_Gm_MNSS6
+Host: Soybean
+Isolate: MNSS6
+Timepoint: 48h
+========================================
+Total Input Reads:          37307698
+Uniquely Mapped Reads:      34826529 (93.35%)
+Multi-mapped Reads:         6.37%
+Unmapped (too short):       0.06%
+Unmapped (other):           0.18%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_2_Gm_SSPotter
+Host: Soybean
+Isolate: SSPotter
+Timepoint: 48h
+========================================
+Total Input Reads:          47802601
+Uniquely Mapped Reads:      44631596 (93.37%)
+Multi-mapped Reads:         6.30%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.24%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_2_Gm_WISS47
+Host: Soybean
+Isolate: WISS47
+Timepoint: 48h
+========================================
+Total Input Reads:          35872290
+Uniquely Mapped Reads:      33135242 (92.37%)
+Multi-mapped Reads:         7.23%
+Unmapped (too short):       0.17%
+Unmapped (other):           0.18%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_2_Gm_Xtra7
+Host: Soybean
+Isolate: Xtra7
+Timepoint: 48h
+========================================
+Total Input Reads:          36355437
+Uniquely Mapped Reads:      33947580 (93.38%)
+Multi-mapped Reads:         6.37%
+Unmapped (too short):       0.11%
+Unmapped (other):           0.11%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_3_Gm_BN172
+Host: Soybean
+Isolate: BN172
+Timepoint: 48h
+========================================
+Total Input Reads:          34160274
+Uniquely Mapped Reads:      31969419 (93.59%)
+Multi-mapped Reads:         6.15%
+Unmapped (too short):       0.04%
+Unmapped (other):           0.18%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_3_Gm_JS659
+Host: Soybean
+Isolate: JS659
+Timepoint: 48h
+========================================
+Total Input Reads:          36108757
+Uniquely Mapped Reads:      33671746 (93.25%)
+Multi-mapped Reads:         6.51%
+Unmapped (too short):       0.05%
+Unmapped (other):           0.14%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_3_Gm_MNSS6
+Host: Soybean
+Isolate: MNSS6
+Timepoint: 48h
+========================================
+Total Input Reads:          35556182
+Uniquely Mapped Reads:      33081865 (93.04%)
+Multi-mapped Reads:         6.60%
+Unmapped (too short):       0.06%
+Unmapped (other):           0.25%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_3_Gm_SSPotter
+Host: Soybean
+Isolate: SSPotter
+Timepoint: 48h
+========================================
+Total Input Reads:          36606126
+Uniquely Mapped Reads:      34214854 (93.47%)
+Multi-mapped Reads:         6.20%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.24%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_3_Gm_WISS47
+Host: Soybean
+Isolate: WISS47
+Timepoint: 48h
+========================================
+Total Input Reads:          38347494
+Uniquely Mapped Reads:      35393004 (92.30%)
+Multi-mapped Reads:         7.27%
+Unmapped (too short):       0.16%
+Unmapped (other):           0.22%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 48_3_Gm_Xtra7
+Host: Soybean
+Isolate: Xtra7
+Timepoint: 48h
+========================================
+Total Input Reads:          42628800
+Uniquely Mapped Reads:      39790318 (93.34%)
+Multi-mapped Reads:         6.36%
+Unmapped (too short):       0.11%
+Unmapped (other):           0.15%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_1_Gm_BN172
+Host: Soybean
+Isolate: BN172
+Timepoint: 96h
+========================================
+Total Input Reads:          38899777
+Uniquely Mapped Reads:      36408955 (93.60%)
+Multi-mapped Reads:         6.20%
+Unmapped (too short):       0.06%
+Unmapped (other):           0.11%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_1_Gm_SSPotter
+Host: Soybean
+Isolate: SSPotter
+Timepoint: 96h
+========================================
+Total Input Reads:          37063929
+Uniquely Mapped Reads:      34645852 (93.48%)
+Multi-mapped Reads:         6.34%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.12%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_2_Gm_BN172
+Host: Soybean
+Isolate: BN172
+Timepoint: 96h
+========================================
+Total Input Reads:          37208573
+Uniquely Mapped Reads:      34850055 (93.66%)
+Multi-mapped Reads:         6.14%
+Unmapped (too short):       0.05%
+Unmapped (other):           0.11%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_2_Gm_SSPotter
+Host: Soybean
+Isolate: SSPotter
+Timepoint: 96h
+========================================
+Total Input Reads:          35313291
+Uniquely Mapped Reads:      32902392 (93.17%)
+Multi-mapped Reads:         6.58%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.17%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_3_Gm_BN172
+Host: Soybean
+Isolate: BN172
+Timepoint: 96h
+========================================
+Total Input Reads:          37246138
+Uniquely Mapped Reads:      34918121 (93.75%)
+Multi-mapped Reads:         6.05%
+Unmapped (too short):       0.06%
+Unmapped (other):           0.11%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_3_Gm_SSPotter
+Host: Soybean
+Isolate: SSPotter
+Timepoint: 96h
+========================================
+Total Input Reads:          37259682
+Uniquely Mapped Reads:      34700853 (93.13%)
+Multi-mapped Reads:         6.63%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.17%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_4_Gm_BN172
+Host: Soybean
+Isolate: BN172
+Timepoint: 96h
+========================================
+Total Input Reads:          50524100
+Uniquely Mapped Reads:      47192363 (93.41%)
+Multi-mapped Reads:         6.44%
+Unmapped (too short):       0.05%
+Unmapped (other):           0.08%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_4_Gm_JS659
+Host: Soybean
+Isolate: JS659
+Timepoint: 96h
+========================================
+Total Input Reads:          44285848
+Uniquely Mapped Reads:      41442455 (93.58%)
+Multi-mapped Reads:         6.27%
+Unmapped (too short):       0.06%
+Unmapped (other):           0.07%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_4_Gm_MNSS6
+Host: Soybean
+Isolate: MNSS6
+Timepoint: 96h
+========================================
+Total Input Reads:          46633277
+Uniquely Mapped Reads:      43456830 (93.19%)
+Multi-mapped Reads:         6.63%
+Unmapped (too short):       0.04%
+Unmapped (other):           0.11%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_4_Gm_SSPotter
+Host: Soybean
+Isolate: SSPotter
+Timepoint: 96h
+========================================
+Total Input Reads:          35795666
+Uniquely Mapped Reads:      33568106 (93.78%)
+Multi-mapped Reads:         6.03%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.13%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_4_Gm_WISS47
+Host: Soybean
+Isolate: WISS47
+Timepoint: 96h
+========================================
+Total Input Reads:          36899865
+Uniquely Mapped Reads:      34545721 (93.62%)
+Multi-mapped Reads:         6.20%
+Unmapped (too short):       0.05%
+Unmapped (other):           0.10%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_4_Gm_Xtra7
+Host: Soybean
+Isolate: Xtra7
+Timepoint: 96h
+========================================
+Total Input Reads:          38368960
+Uniquely Mapped Reads:      36009955 (93.85%)
+Multi-mapped Reads:         5.99%
+Unmapped (too short):       0.04%
+Unmapped (other):           0.09%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_5_Gm_BN172
+Host: Soybean
+Isolate: BN172
+Timepoint: 96h
+========================================
+Total Input Reads:          49495562
+Uniquely Mapped Reads:      46303029 (93.55%)
+Multi-mapped Reads:         6.31%
+Unmapped (too short):       0.05%
+Unmapped (other):           0.08%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_5_Gm_JS659
+Host: Soybean
+Isolate: JS659
+Timepoint: 96h
+========================================
+Total Input Reads:          41372263
+Uniquely Mapped Reads:      38628692 (93.37%)
+Multi-mapped Reads:         6.46%
+Unmapped (too short):       0.06%
+Unmapped (other):           0.09%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_5_Gm_MNSS6
+Host: Soybean
+Isolate: MNSS6
+Timepoint: 96h
+========================================
+Total Input Reads:          45131698
+Uniquely Mapped Reads:      42010932 (93.09%)
+Multi-mapped Reads:         6.70%
+Unmapped (too short):       0.04%
+Unmapped (other):           0.14%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_5_Gm_SSPotter
+Host: Soybean
+Isolate: SSPotter
+Timepoint: 96h
+========================================
+Total Input Reads:          31885635
+Uniquely Mapped Reads:      29854177 (93.63%)
+Multi-mapped Reads:         6.14%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.16%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_5_Gm_WISS47
+Host: Soybean
+Isolate: WISS47
+Timepoint: 96h
+========================================
+Total Input Reads:          36783696
+Uniquely Mapped Reads:      34443919 (93.64%)
+Multi-mapped Reads:         6.18%
+Unmapped (too short):       0.05%
+Unmapped (other):           0.11%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_5_Gm_Xtra7
+Host: Soybean
+Isolate: Xtra7
+Timepoint: 96h
+========================================
+Total Input Reads:          41810985
+Uniquely Mapped Reads:      39215948 (93.79%)
+Multi-mapped Reads:         6.04%
+Unmapped (too short):       0.04%
+Unmapped (other):           0.10%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_6_Gm_BN172
+Host: Soybean
+Isolate: BN172
+Timepoint: 96h
+========================================
+Total Input Reads:          49341132
+Uniquely Mapped Reads:      45934005 (93.09%)
+Multi-mapped Reads:         6.69%
+Unmapped (too short):       0.05%
+Unmapped (other):           0.13%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_6_Gm_JS659
+Host: Soybean
+Isolate: JS659
+Timepoint: 96h
+========================================
+Total Input Reads:          42278927
+Uniquely Mapped Reads:      39496183 (93.42%)
+Multi-mapped Reads:         6.41%
+Unmapped (too short):       0.06%
+Unmapped (other):           0.08%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_6_Gm_MNSS6
+Host: Soybean
+Isolate: MNSS6
+Timepoint: 96h
+========================================
+Total Input Reads:          38190855
+Uniquely Mapped Reads:      35553765 (93.09%)
+Multi-mapped Reads:         6.70%
+Unmapped (too short):       0.04%
+Unmapped (other):           0.13%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_6_Gm_SSPotter
+Host: Soybean
+Isolate: SSPotter
+Timepoint: 96h
+========================================
+Total Input Reads:          39683122
+Uniquely Mapped Reads:      37071319 (93.42%)
+Multi-mapped Reads:         6.29%
+Unmapped (too short):       0.03%
+Unmapped (other):           0.21%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_6_Gm_WISS47
+Host: Soybean
+Isolate: WISS47
+Timepoint: 96h
+========================================
+Total Input Reads:          35067063
+Uniquely Mapped Reads:      32832337 (93.63%)
+Multi-mapped Reads:         6.18%
+Unmapped (too short):       0.05%
+Unmapped (other):           0.11%
+Chimeric Reads:             0.00%
+
+
+========================================
+Sample: 96_6_Gm_Xtra7
+Host: Soybean
+Isolate: Xtra7
+Timepoint: 96h
+========================================
+Total Input Reads:          34063347
+Uniquely Mapped Reads:      31915718 (93.70%)
+Multi-mapped Reads:         6.12%
+Unmapped (too short):       0.04%
+Unmapped (other):           0.11%
+Chimeric Reads:             0.00%
+
+Quick Statistics:
+----------------
+Total samples processed: 120
+
+Average mapping rates:
+  Uniquely mapped: 92.80%
+  Multi-mapped: 6.91%
+  Unmapped (too short): 0.17%
