@@ -1,0 +1,731 @@
+---
+title: "UpSet Plot — Pathogen DEGs by Isolate, Timepoint & Host"
+subtitle: "Sclerotinia sclerotiorum isolate-level comparisons"
+author: "Analysis by wan00965"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 16, fig.height = 10, dpi = 300)
+```
+
+# 1. Setup
+
+```{r libraries}
+library(DESeq2)
+library(UpSetR)
+library(ComplexHeatmap)
+library(ggplot2)
+library(dplyr)
+library(grid)
+library(circlize)  # for color mapping
+
+cat("Libraries loaded.\n")
+```
+
+```{r set-wd}
+setwd("/Users/andrew20445/Desktop/To_do_list/RNAseq_data/New_salmon_round3/new_run_count")
+```
+
+# 2. Load Data & Run Per-Isolate DESeq2
+
+## 2.1 Helper Functions
+
+```{r helpers}
+# ── Build metadata from sample names ──
+build_metadata <- function(sample_names) {
+  md <- data.frame(sample = sample_names, row.names = sample_names,
+                   stringsAsFactors = FALSE)
+  md$timepoint_num <- sapply(strsplit(sample_names, "_"), `[`, 1)
+  md$replicate     <- sapply(strsplit(sample_names, "_"), `[`, 2)
+  md$batch         <- factor(sapply(strsplit(sample_names, "_"), `[`, 2))
+  md$species       <- sapply(strsplit(sample_names, "_"), `[`, 3)
+  md$isolate       <- sapply(strsplit(sample_names, "_"), function(x) x[length(x)])
+  
+  md$timepoint <- sapply(sample_names, function(x) {
+    parts <- strsplit(x, "_")[[1]]
+    if (parts[length(parts)] == "NC") return("NC")
+    else return(paste0(parts[1], "h"))
+  })
+  
+  md$aggressiveness <- sapply(md$isolate, function(iso) {
+    if (iso == "NC") return("Control")
+    if (iso %in% c("WISS47", "JS659")) return("Low")
+    if (iso %in% c("Xtra7", "MNSS6")) return("High")
+    if (iso == "SSPotter") return("Soy-specific")
+    if (iso == "BN172") return("Sun-specific")
+    return("Unknown")
+  })
+  
+  md$timepoint      <- factor(md$timepoint, levels = c("NC","24h","48h","96h"))
+  md$isolate        <- factor(md$isolate)
+  md$aggressiveness <- factor(md$aggressiveness,
+                              levels = c("Control","Low","High","Soy-specific","Sun-specific"))
+  return(md)
+}
+
+# ── Run per-isolate DEG analysis at a given timepoint ──
+# Compare: isolate X vs Low (WISS47+JS659) at timepoint tp
+run_isolate_vs_low <- function(dds_pathogen, metadata_infected, 
+                                isolate_name, tp, padj_cutoff = 0.05) {
+  
+  # Subset to this timepoint
+  md_tp <- metadata_infected[metadata_infected$timepoint == tp, ]
+  
+  # Keep only this isolate + Low isolates
+  md_sub <- md_tp[md_tp$isolate == isolate_name | md_tp$aggressiveness == "Low", ]
+  
+  if (nrow(md_sub) < 4) {
+    cat(sprintf("    Skipped %s @ %s: only %d samples\n", isolate_name, tp, nrow(md_sub)))
+    return(NULL)
+  }
+  
+  # Check we have both groups
+  md_sub$group <- ifelse(md_sub$isolate == isolate_name, "Target", "Low")
+  md_sub$group <- factor(md_sub$group, levels = c("Low", "Target"))
+  
+  if (length(unique(md_sub$group)) < 2) {
+    cat(sprintf("    Skipped %s @ %s: only one group\n", isolate_name, tp))
+    return(NULL)
+  }
+  
+  # Subset dds
+  dds_sub <- dds_pathogen[, rownames(md_sub)]
+  colData(dds_sub)$group <- md_sub$group
+  design(dds_sub) <- ~ group
+  
+  # Run DESeq2
+  tryCatch({
+    dds_sub <- DESeq(dds_sub, quiet = TRUE)
+    res <- results(dds_sub, contrast = c("group", "Target", "Low"), alpha = padj_cutoff)
+    res <- res[!is.na(res$padj) & res$padj < padj_cutoff, ]
+    res <- res[order(res$padj), ]
+    return(as.data.frame(res))
+  }, error = function(e) {
+    cat(sprintf("    Error %s @ %s: %s\n", isolate_name, tp, e$message))
+    return(NULL)
+  })
+}
+```
+
+## 2.2 Process Sunflower (Ha)
+
+```{r process-ha}
+cat("=== Loading Sunflower (Ha) Data ===\n")
+
+counts_pathogen_ha <- round(read.table("gene_counts_sunflower_SALMON_PATHOGEN_only.txt",
+                                        header = TRUE, row.names = 1, check.names = FALSE))
+counts_all_ha <- read.table("gene_counts_sunflower_SALMON.txt",
+                             header = TRUE, row.names = 1, check.names = FALSE)
+
+metadata_ha <- build_metadata(colnames(counts_all_ha))
+metadata_ha_inf <- metadata_ha[metadata_ha$timepoint != "NC", ]
+counts_path_ha_inf <- counts_pathogen_ha[, rownames(metadata_ha_inf)]
+
+# Filter low-expressed genes
+keep <- rowSums(counts_path_ha_inf >= 5) >= 3
+counts_path_ha_filt <- counts_path_ha_inf[keep, ]
+cat(sprintf("Ha pathogen genes after filtering: %d\n", nrow(counts_path_ha_filt)))
+
+# Create base DESeq2 dataset
+dds_path_ha <- DESeqDataSetFromMatrix(
+  countData = counts_path_ha_filt,
+  colData   = metadata_ha_inf,
+  design    = ~ isolate + timepoint
+)
+
+# Show available isolates
+cat("Ha isolates:", paste(levels(metadata_ha_inf$isolate), collapse = ", "), "\n")
+cat("Ha timepoints:", paste(levels(droplevels(metadata_ha_inf$timepoint)), collapse = ", "), "\n")
+```
+
+## 2.3 Process Soybean (Gm)
+
+```{r process-gm}
+cat("=== Loading Soybean (Gm) Data ===\n")
+
+counts_pathogen_gm <- round(read.table("gene_counts_soybean_SALMON_PATHOGEN_only.txt",
+                                        header = TRUE, row.names = 1, check.names = FALSE))
+counts_all_gm <- read.table("gene_counts_soybean_SALMON.txt",
+                              header = TRUE, row.names = 1, check.names = FALSE)
+
+metadata_gm <- build_metadata(colnames(counts_all_gm))
+metadata_gm_inf <- metadata_gm[metadata_gm$timepoint != "NC", ]
+counts_path_gm_inf <- counts_pathogen_gm[, rownames(metadata_gm_inf)]
+
+keep_gm <- rowSums(counts_path_gm_inf >= 5) >= 3
+counts_path_gm_filt <- counts_path_gm_inf[keep_gm, ]
+cat(sprintf("Gm pathogen genes after filtering: %d\n", nrow(counts_path_gm_filt)))
+
+dds_path_gm <- DESeqDataSetFromMatrix(
+  countData = counts_path_gm_filt,
+  colData   = metadata_gm_inf,
+  design    = ~ isolate + timepoint
+)
+
+cat("Gm isolates:", paste(levels(metadata_gm_inf$isolate), collapse = ", "), "\n")
+cat("Gm timepoints:", paste(levels(droplevels(metadata_gm_inf$timepoint)), collapse = ", "), "\n")
+```
+
+## 2.4 Run All Isolate-vs-Low Comparisons
+
+```{r run-all-comparisons}
+# ===================================================================
+# Run DESeq2 for each non-Low isolate vs Low, at each timepoint,
+# in BOTH hosts. This gives per-isolate DEG lists.
+# ===================================================================
+
+timepoints <- c("24h", "48h", "96h")
+
+# Isolates to compare against Low (exclude Low isolates themselves)
+test_isolates <- c("Xtra7", "MNSS6", "BN172", "SSPotter")
+
+# Store all results
+all_deg_sets <- list()   # named list: "Host_Isolate_Timepoint" -> gene vector
+all_deg_dfs  <- list()   # full data frames for metadata
+
+cat("\n=== RUNNING PER-ISOLATE COMPARISONS ===\n")
+
+# ── Sunflower (Ha) ──
+cat("\n--- Sunflower (Ha) ---\n")
+for (iso in test_isolates) {
+  for (tp in timepoints) {
+    set_name <- paste0("Ha_", iso, "_", tp)
+    cat(sprintf("  %s: ", set_name))
+    
+    # Check if this isolate exists at this timepoint
+    avail <- metadata_ha_inf[metadata_ha_inf$timepoint == tp & 
+                              metadata_ha_inf$isolate == iso, ]
+    if (nrow(avail) == 0) {
+      cat("no samples, skipped\n")
+      next
+    }
+    
+    res_df <- run_isolate_vs_low(dds_path_ha, metadata_ha_inf, iso, tp)
+    
+    if (!is.null(res_df) && nrow(res_df) > 0) {
+      all_deg_sets[[set_name]] <- rownames(res_df)
+      all_deg_dfs[[set_name]]  <- res_df
+      cat(sprintf("%d DEGs (Up:%d Down:%d)\n", nrow(res_df),
+                  sum(res_df$log2FoldChange > 0), sum(res_df$log2FoldChange < 0)))
+    } else {
+      cat("0 DEGs\n")
+    }
+  }
+}
+
+# ── Soybean (Gm) ──
+cat("\n--- Soybean (Gm) ---\n")
+for (iso in test_isolates) {
+  for (tp in timepoints) {
+    set_name <- paste0("Gm_", iso, "_", tp)
+    cat(sprintf("  %s: ", set_name))
+    
+    avail <- metadata_gm_inf[metadata_gm_inf$timepoint == tp & 
+                              metadata_gm_inf$isolate == iso, ]
+    if (nrow(avail) == 0) {
+      cat("no samples, skipped\n")
+      next
+    }
+    
+    res_df <- run_isolate_vs_low(dds_path_gm, metadata_gm_inf, iso, tp)
+    
+    if (!is.null(res_df) && nrow(res_df) > 0) {
+      all_deg_sets[[set_name]] <- rownames(res_df)
+      all_deg_dfs[[set_name]]  <- res_df
+      cat(sprintf("%d DEGs (Up:%d Down:%d)\n", nrow(res_df),
+                  sum(res_df$log2FoldChange > 0), sum(res_df$log2FoldChange < 0)))
+    } else {
+      cat("0 DEGs\n")
+    }
+  }
+}
+
+# Remove empty sets
+all_deg_sets <- all_deg_sets[sapply(all_deg_sets, length) > 0]
+
+cat(sprintf("\n=== Total non-empty sets: %d ===\n", length(all_deg_sets)))
+for (nm in names(all_deg_sets)) {
+  cat(sprintf("  %s: %d genes\n", nm, length(all_deg_sets[[nm]])))
+}
+```
+
+---
+
+# 3. Build Membership Matrix
+
+```{r build-matrix}
+# Parse set names into metadata
+set_info <- data.frame(
+  set_name = names(all_deg_sets),
+  stringsAsFactors = FALSE
+)
+set_info$host     <- sub("^(Ha|Gm)_.*", "\\1", set_info$set_name)
+set_info$isolate  <- sub("^(Ha|Gm)_(.+)_(\\d+h)$", "\\2", set_info$set_name)
+set_info$timepoint <- sub("^.*_(\\d+h)$", "\\1", set_info$set_name)
+
+set_info$aggressiveness <- sapply(set_info$isolate, function(iso) {
+  if (iso %in% c("Xtra7", "MNSS6")) return("High")
+  if (iso == "SSPotter") return("Soy-specific")
+  if (iso == "BN172") return("Sun-specific")
+  return("Other")
+})
+
+cat("=== SET METADATA ===\n")
+print(set_info)
+
+# Binary membership matrix
+all_genes <- unique(unlist(all_deg_sets))
+cat(sprintf("\nTotal unique pathogen DEGs: %d\n", length(all_genes)))
+
+mat <- matrix(0L, nrow = length(all_genes), ncol = length(all_deg_sets),
+              dimnames = list(all_genes, names(all_deg_sets)))
+for (nm in names(all_deg_sets)) mat[all_deg_sets[[nm]], nm] <- 1L
+```
+
+```{r gene-direction}
+# Classify each gene's overall regulation direction
+gene_direction <- sapply(all_genes, function(g) {
+  lfcs <- c()
+  for (nm in names(all_deg_dfs)) {
+    df <- all_deg_dfs[[nm]]
+    if (g %in% rownames(df)) lfcs <- c(lfcs, df[g, "log2FoldChange"])
+  }
+  if (length(lfcs) == 0) return("Unknown")
+  if (all(lfcs > 0)) return("Up")
+  if (all(lfcs < 0)) return("Down")
+  return("Mixed")
+})
+
+cat("\nDirection breakdown:\n")
+print(table(gene_direction))
+```
+
+---
+
+# 4. UpSet Plot A: All Isolates × Timepoints × Hosts
+
+```{r upset-full, fig.width=20, fig.height=12}
+# ===================================================================
+# Full detailed UpSet: every isolate × timepoint × host as a set
+# Color-coded by host and sorted by intersection size
+# ===================================================================
+
+if (length(all_deg_sets) >= 2) {
+  
+  comb_mat <- make_comb_mat(mat, mode = "distinct")
+  # Keep intersections with >= 2 genes
+  comb_mat <- comb_mat[comb_size(comb_mat) >= 2]
+  # Show top 40 intersections
+  n_show <- min(40, length(comb_size(comb_mat)))
+  top_idx <- order(comb_size(comb_mat), decreasing = TRUE)[1:n_show]
+  comb_mat <- comb_mat[top_idx]
+  
+  # --- Set colors by host ---
+  sn <- set_name(comb_mat)
+  set_cols <- ifelse(grepl("^Ha_", sn), "#E69F00", "#56B4E9")
+  
+  # --- Bar colors: cross-host = red, Ha-only = orange, Gm-only = blue ---
+  comb_ids <- comb_name(comb_mat)
+  bar_col <- sapply(comb_ids, function(cid) {
+    bits <- as.integer(strsplit(cid, "")[[1]])
+    members <- sn[bits == 1]
+    has_ha <- any(grepl("^Ha_", members))
+    has_gm <- any(grepl("^Gm_", members))
+    if (has_ha && has_gm) return("#DC143C")
+    if (has_ha) return("#E69F00")
+    return("#56B4E9")
+  })
+  
+  ht <- UpSet(comb_mat,
+    set_order = order(grepl("^Gm_", sn), sn),  # Ha first, then Gm
+    comb_order = order(comb_size(comb_mat), decreasing = TRUE),
+    
+    top_annotation = HeatmapAnnotation(
+      "Intersection\nSize" = anno_barplot(
+        comb_size(comb_mat),
+        gp = gpar(fill = bar_col, col = bar_col),
+        border = FALSE, height = unit(8, "cm"),
+        add_numbers = TRUE, numbers_gp = gpar(fontsize = 8)),
+      annotation_name_side = "left", annotation_name_rot = 0),
+    
+    left_annotation = rowAnnotation(
+      "Set Size" = anno_barplot(
+        set_size(comb_mat),
+        gp = gpar(fill = set_cols),
+        border = FALSE, width = unit(4, "cm"),
+        add_numbers = TRUE, numbers_gp = gpar(fontsize = 9)),
+      annotation_name_rot = 0),
+    
+    # Right side: show set name with color
+    right_annotation = rowAnnotation(
+      Host = set_info$host[match(sn, set_info$set_name)],
+      Isolate = set_info$isolate[match(sn, set_info$set_name)],
+      Timepoint = set_info$timepoint[match(sn, set_info$set_name)],
+      col = list(
+        Host = c("Ha" = "#E69F00", "Gm" = "#56B4E9"),
+        Isolate = c("Xtra7" = "#E41A1C", "MNSS6" = "#FF7F00", 
+                     "BN172" = "#984EA3", "SSPotter" = "#4DAF4A"),
+        Timepoint = c("24h" = "#66C2A5", "48h" = "#FC8D62", "96h" = "#8DA0CB")
+      ),
+      annotation_name_gp = gpar(fontsize = 10),
+      simple_anno_size = unit(4, "mm")
+    ),
+    
+    pt_size = unit(3.5, "mm"), lwd = 2,
+    row_names_gp = gpar(fontsize = 10, fontface = "bold", col = set_cols),
+    column_title = "Pathogen DEGs by Isolate: All Conditions",
+    column_title_gp = gpar(fontsize = 16, fontface = "bold")
+  )
+  
+  draw(ht, padding = unit(c(2, 15, 2, 2), "mm"))
+  
+} else {
+  cat("Need at least 2 non-empty sets.\n")
+}
+```
+
+---
+
+# 5. UpSet Plot B: Grouped by Isolate (Timepoints Merged)
+
+```{r upset-by-isolate, fig.width=16, fig.height=9}
+# ===================================================================
+# Merge timepoints per isolate: one set per Host_Isolate
+# Shows which isolates share DEGs regardless of timing
+# ===================================================================
+
+iso_merged <- list()
+for (host in c("Ha", "Gm")) {
+  for (iso in test_isolates) {
+    merged_name <- paste0(host, "_", iso)
+    genes <- unique(unlist(all_deg_sets[grep(paste0("^", merged_name, "_"), 
+                                              names(all_deg_sets))]))
+    if (length(genes) > 0) iso_merged[[merged_name]] <- genes
+  }
+}
+
+if (length(iso_merged) >= 2) {
+  
+  all_g_iso <- unique(unlist(iso_merged))
+  mat_iso <- matrix(0L, nrow = length(all_g_iso), ncol = length(iso_merged),
+                    dimnames = list(all_g_iso, names(iso_merged)))
+  for (nm in names(iso_merged)) mat_iso[iso_merged[[nm]], nm] <- 1L
+  
+  comb_iso <- make_comb_mat(mat_iso, mode = "distinct")
+  comb_iso <- comb_iso[comb_size(comb_iso) >= 2]
+  n_show_iso <- min(30, length(comb_size(comb_iso)))
+  top_iso <- order(comb_size(comb_iso), decreasing = TRUE)[1:n_show_iso]
+  comb_iso <- comb_iso[top_iso]
+  
+  sn_iso <- set_name(comb_iso)
+  set_cols_iso <- ifelse(grepl("^Ha_", sn_iso), "#E69F00", "#56B4E9")
+  
+  # Bar colors
+  cids_iso <- comb_name(comb_iso)
+  bar_col_iso <- sapply(cids_iso, function(cid) {
+    bits <- as.integer(strsplit(cid, "")[[1]])
+    members <- sn_iso[bits == 1]
+    has_ha <- any(grepl("^Ha_", members))
+    has_gm <- any(grepl("^Gm_", members))
+    if (has_ha && has_gm) return("#DC143C")
+    if (has_ha) return("#E69F00")
+    return("#56B4E9")
+  })
+  
+  # Parse isolate info
+  iso_info <- data.frame(
+    set = sn_iso,
+    host = sub("^(Ha|Gm)_.*", "\\1", sn_iso),
+    isolate = sub("^(Ha|Gm)_", "", sn_iso),
+    stringsAsFactors = FALSE
+  )
+  
+  ht_iso <- UpSet(comb_iso,
+    set_order = order(grepl("^Gm_", sn_iso), sn_iso),
+    comb_order = order(comb_size(comb_iso), decreasing = TRUE),
+    
+    top_annotation = HeatmapAnnotation(
+      "Intersection\nSize" = anno_barplot(
+        comb_size(comb_iso),
+        gp = gpar(fill = bar_col_iso, col = bar_col_iso),
+        border = FALSE, height = unit(7, "cm"),
+        add_numbers = TRUE, numbers_gp = gpar(fontsize = 10)),
+      annotation_name_side = "left", annotation_name_rot = 0),
+    
+    left_annotation = rowAnnotation(
+      "Set Size" = anno_barplot(
+        set_size(comb_iso),
+        gp = gpar(fill = set_cols_iso),
+        border = FALSE, width = unit(4, "cm"),
+        add_numbers = TRUE, numbers_gp = gpar(fontsize = 11)),
+      annotation_name_rot = 0),
+    
+    right_annotation = rowAnnotation(
+      Host = iso_info$host,
+      Isolate = iso_info$isolate,
+      col = list(
+        Host = c("Ha" = "#E69F00", "Gm" = "#56B4E9"),
+        Isolate = c("Xtra7" = "#E41A1C", "MNSS6" = "#FF7F00",
+                     "BN172" = "#984EA3", "SSPotter" = "#4DAF4A")
+      ),
+      simple_anno_size = unit(5, "mm")
+    ),
+    
+    pt_size = unit(5, "mm"), lwd = 2.5,
+    row_names_gp = gpar(fontsize = 12, fontface = "bold", col = set_cols_iso),
+    column_title = "Pathogen DEGs by Isolate (Timepoints Merged)",
+    column_title_gp = gpar(fontsize = 16, fontface = "bold")
+  )
+  
+  draw(ht_iso, padding = unit(c(2, 15, 2, 2), "mm"))
+}
+```
+
+---
+
+# 6. UpSet Plot C: Per-Timepoint Panels (Isolates Within Each Timepoint)
+
+```{r upset-per-timepoint, fig.width=16, fig.height=8, results='asis'}
+# ===================================================================
+# One UpSet plot per timepoint: compare isolate DEGs within each tp
+# ===================================================================
+
+for (tp in timepoints) {
+  
+  cat(sprintf("\n\n## Timepoint: %s\n\n", tp))
+  
+  # Collect sets for this timepoint
+  tp_sets <- all_deg_sets[grep(paste0("_", tp, "$"), names(all_deg_sets))]
+  
+  if (length(tp_sets) < 2) {
+    cat(sprintf("Only %d sets at %s — skipping\n", length(tp_sets), tp))
+    next
+  }
+  
+  # Rename for cleaner labels (drop timepoint)
+  names(tp_sets) <- sub(paste0("_", tp, "$"), "", names(tp_sets))
+  
+  all_g_tp <- unique(unlist(tp_sets))
+  mat_tp <- matrix(0L, nrow = length(all_g_tp), ncol = length(tp_sets),
+                   dimnames = list(all_g_tp, names(tp_sets)))
+  for (nm in names(tp_sets)) mat_tp[tp_sets[[nm]], nm] <- 1L
+  
+  comb_tp <- make_comb_mat(mat_tp, mode = "distinct")
+  if (length(comb_size(comb_tp)) == 0) next
+  comb_tp <- comb_tp[comb_size(comb_tp) >= 1]
+  n_show_tp <- min(25, length(comb_size(comb_tp)))
+  top_tp <- order(comb_size(comb_tp), decreasing = TRUE)[1:n_show_tp]
+  comb_tp <- comb_tp[top_tp]
+  
+  sn_tp <- set_name(comb_tp)
+  set_cols_tp <- ifelse(grepl("^Ha_", sn_tp), "#E69F00", "#56B4E9")
+  
+  cids_tp <- comb_name(comb_tp)
+  bar_col_tp <- sapply(cids_tp, function(cid) {
+    bits <- as.integer(strsplit(cid, "")[[1]])
+    members <- sn_tp[bits == 1]
+    has_ha <- any(grepl("^Ha_", members))
+    has_gm <- any(grepl("^Gm_", members))
+    if (has_ha && has_gm) return("#DC143C")
+    if (has_ha) return("#E69F00")
+    return("#56B4E9")
+  })
+  
+  ht_tp <- UpSet(comb_tp,
+    set_order = order(grepl("^Gm_", sn_tp), sn_tp),
+    comb_order = order(comb_size(comb_tp), decreasing = TRUE),
+    
+    top_annotation = HeatmapAnnotation(
+      "Intersection\nSize" = anno_barplot(
+        comb_size(comb_tp),
+        gp = gpar(fill = bar_col_tp, col = bar_col_tp),
+        border = FALSE, height = unit(6, "cm"),
+        add_numbers = TRUE, numbers_gp = gpar(fontsize = 10)),
+      annotation_name_side = "left", annotation_name_rot = 0),
+    
+    left_annotation = rowAnnotation(
+      "Set Size" = anno_barplot(
+        set_size(comb_tp),
+        gp = gpar(fill = set_cols_tp),
+        border = FALSE, width = unit(3.5, "cm"),
+        add_numbers = TRUE, numbers_gp = gpar(fontsize = 11)),
+      annotation_name_rot = 0),
+    
+    pt_size = unit(5, "mm"), lwd = 2.5,
+    row_names_gp = gpar(fontsize = 13, fontface = "bold", col = set_cols_tp),
+    column_title = paste0("Pathogen DEGs at ", tp, " — Isolate vs Low"),
+    column_title_gp = gpar(fontsize = 15, fontface = "bold")
+  )
+  
+  draw(ht_tp)
+  grid.text(paste0("Orange = Sunflower (Ha)  |  Blue = Soybean (Gm)  |  Red = Cross-host    [", tp, "]"),
+            x = 0.5, y = 0.01, gp = gpar(fontsize = 10, col = "gray40"))
+  cat("\n\n")
+}
+```
+
+---
+
+# 7. UpSet Plot D: Same Isolate Across Hosts
+
+```{r upset-same-isolate, fig.width=14, fig.height=7, results='asis'}
+# ===================================================================
+# For each isolate, compare its DEGs in Ha vs Gm across timepoints
+# Shows host-specificity of each isolate's effect
+# ===================================================================
+
+for (iso in test_isolates) {
+  
+  cat(sprintf("\n\n## Isolate: %s\n\n", iso))
+  
+  iso_sets <- all_deg_sets[grep(paste0("_", iso, "_"), names(all_deg_sets))]
+  
+  if (length(iso_sets) < 2) {
+    cat(sprintf("Only %d sets for %s — skipping\n", length(iso_sets), iso))
+    next
+  }
+  
+  all_g_i <- unique(unlist(iso_sets))
+  mat_i <- matrix(0L, nrow = length(all_g_i), ncol = length(iso_sets),
+                  dimnames = list(all_g_i, names(iso_sets)))
+  for (nm in names(iso_sets)) mat_i[iso_sets[[nm]], nm] <- 1L
+  
+  comb_i <- make_comb_mat(mat_i, mode = "distinct")
+  if (length(comb_size(comb_i)) == 0) next
+  comb_i <- comb_i[comb_size(comb_i) >= 1]
+  comb_i <- comb_i[order(comb_size(comb_i), decreasing = TRUE)]
+  
+  sn_i <- set_name(comb_i)
+  set_cols_i <- ifelse(grepl("^Ha_", sn_i), "#E69F00", "#56B4E9")
+  
+  cids_i <- comb_name(comb_i)
+  bar_col_i <- sapply(cids_i, function(cid) {
+    bits <- as.integer(strsplit(cid, "")[[1]])
+    members <- sn_i[bits == 1]
+    has_ha <- any(grepl("^Ha_", members))
+    has_gm <- any(grepl("^Gm_", members))
+    if (has_ha && has_gm) return("#DC143C")
+    if (has_ha) return("#E69F00")
+    return("#56B4E9")
+  })
+  
+  # Isolate category label
+  agg_label <- switch(iso,
+    "Xtra7" = "High aggressive",
+    "MNSS6" = "High aggressive", 
+    "BN172" = "Sunflower-specific",
+    "SSPotter" = "Soybean-specific",
+    iso)
+  
+  ht_i <- UpSet(comb_i,
+    set_order = order(grepl("^Gm_", sn_i), sn_i),
+    comb_order = order(comb_size(comb_i), decreasing = TRUE),
+    
+    top_annotation = HeatmapAnnotation(
+      "Intersection\nSize" = anno_barplot(
+        comb_size(comb_i),
+        gp = gpar(fill = bar_col_i, col = bar_col_i),
+        border = FALSE, height = unit(6, "cm"),
+        add_numbers = TRUE, numbers_gp = gpar(fontsize = 11)),
+      annotation_name_side = "left", annotation_name_rot = 0),
+    
+    left_annotation = rowAnnotation(
+      "Set Size" = anno_barplot(
+        set_size(comb_i),
+        gp = gpar(fill = set_cols_i),
+        border = FALSE, width = unit(3.5, "cm"),
+        add_numbers = TRUE, numbers_gp = gpar(fontsize = 12)),
+      annotation_name_rot = 0),
+    
+    pt_size = unit(5, "mm"), lwd = 2.5,
+    row_names_gp = gpar(fontsize = 13, fontface = "bold", col = set_cols_i),
+    column_title = paste0(iso, " (", agg_label, ") vs Low — Both Hosts"),
+    column_title_gp = gpar(fontsize = 15, fontface = "bold")
+  )
+  
+  draw(ht_i)
+  cat("\n\n")
+}
+```
+
+---
+
+# 8. Export DEG Lists
+
+```{r export, eval=FALSE}
+# ===================================================================
+# Save per-isolate DEG tables as CSV for downstream analysis
+# ===================================================================
+
+output_dir <- "./per_isolate_pathogen_DEGs"
+if (!dir.exists(output_dir)) dir.create(output_dir)
+
+for (nm in names(all_deg_dfs)) {
+  fname <- file.path(output_dir, paste0(nm, "_DEGs.csv"))
+  write.csv(all_deg_dfs[[nm]], fname)
+  cat(sprintf("Saved: %s (%d genes)\n", fname, nrow(all_deg_dfs[[nm]])))
+}
+
+cat(sprintf("\nAll %d DEG files saved to %s\n", length(all_deg_dfs), output_dir))
+```
+
+# 9. Save Plots as PDF
+
+```{r save-pdfs, eval=FALSE}
+# Full detailed UpSet
+pdf("Fig_UpSet_pathogen_by_isolate_full.pdf", width = 20, height = 12)
+draw(ht, padding = unit(c(2, 15, 2, 2), "mm"))
+dev.off()
+
+# Isolate-merged UpSet
+if (exists("ht_iso")) {
+  pdf("Fig_UpSet_pathogen_by_isolate_merged.pdf", width = 16, height = 9)
+  draw(ht_iso, padding = unit(c(2, 15, 2, 2), "mm"))
+  dev.off()
+}
+
+cat("PDFs saved.\n")
+```
+
+---
+
+# 10. Summary
+
+```{r summary}
+cat("\n=== ISOLATE-LEVEL UPSET SUMMARY ===\n\n")
+
+cat("Comparisons run: each isolate vs Low (WISS47+JS659)\n")
+cat(sprintf("Hosts: Ha (Sunflower), Gm (Soybean)\n"))
+cat(sprintf("Isolates tested: %s\n", paste(test_isolates, collapse = ", ")))
+cat(sprintf("Timepoints: %s\n", paste(timepoints, collapse = ", ")))
+cat(sprintf("Total non-empty sets: %d\n\n", length(all_deg_sets)))
+
+cat("DEG counts per condition:\n")
+for (nm in sort(names(all_deg_sets))) {
+  n <- length(all_deg_sets[[nm]])
+  df <- all_deg_dfs[[nm]]
+  n_up <- sum(df$log2FoldChange > 0)
+  n_dn <- sum(df$log2FoldChange < 0)
+  cat(sprintf("  %-20s  %5d DEGs (Up: %4d  Down: %4d)\n", nm, n, n_up, n_dn))
+}
+
+cat("\nPlots generated:\n")
+cat("  A. Full: all isolate × timepoint × host sets\n")
+cat("  B. Isolate-merged: timepoints combined per isolate\n")
+cat("  C. Per-timepoint: isolate comparison within each timepoint\n")
+cat("  D. Per-isolate: same isolate compared across hosts\n")
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```

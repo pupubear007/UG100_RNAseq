@@ -1,0 +1,1958 @@
+---
+title: "Soybean-Sclerotinia DESeq2 Analysis (Salmon)"
+author: "Analysis by wan00965"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 10, fig.height = 7)
+```
+
+# Setup
+
+## Install Required Packages (Run Once)
+
+```{r install-packages, eval=FALSE}
+# Only run this once if packages are not installed
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install(c("DESeq2", "ComplexHeatmap", "EnhancedVolcano"))
+install.packages(c("ggplot2", "pheatmap", "RColorBrewer", "dplyr", "tidyr"))
+```
+
+## Load Libraries
+
+```{r load-libraries}
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(RColorBrewer)
+library(dplyr)
+library(tidyr)
+library(ComplexHeatmap)
+library(EnhancedVolcano)
+
+cat("All libraries loaded successfully!\n")
+```
+
+## Set Working Directory
+
+```{r set-directory}
+# Update this path to where your count files are located
+setwd("/Users/andrew20445/Desktop/To_do_list/RNAseq_data/New_salmon_round3/new_run_count")
+
+# Verify we're in the right place
+list.files(pattern = "gene_counts.*soybean.*SALMON")
+```
+
+# Load Data
+
+```{r load-data}
+# Load count matrices
+counts_all <- read.table("gene_counts_soybean_SALMON.txt", 
+                         header = TRUE, row.names = 1, check.names = FALSE)
+counts_host <- read.table("gene_counts_soybean_SALMON_HOST_only.txt", 
+                          header = TRUE, row.names = 1, check.names = FALSE)
+counts_pathogen <- read.table("gene_counts_soybean_SALMON_PATHOGEN_only.txt", 
+                              header = TRUE, row.names = 1, check.names = FALSE)
+
+cat(sprintf("Total genes: %d\n", nrow(counts_all)))
+cat(sprintf("Host genes (Gm_): %d\n", nrow(counts_host)))
+cat(sprintf("Pathogen genes (Ss_): %d\n", nrow(counts_pathogen)))
+cat(sprintf("Samples: %d\n", ncol(counts_all)))
+```
+
+## Create Metadata
+
+```{r create-metadata}
+# Extract sample information from column names
+# Sample name pattern: timepoint_replicate_species_Ssisolate
+# Examples: "0_1_Gm_NC", "24_1_Gm_BN172", "48_2_Gm_JS659", "96_3_Gm_SSPotter"
+
+sample_names <- colnames(counts_all)
+
+metadata <- data.frame(
+  sample = sample_names,
+  row.names = sample_names,
+  stringsAsFactors = FALSE
+)
+
+# Extract components from sample names
+metadata$replicate <- sapply(strsplit(sample_names, "_"), `[`, 1)
+metadata$batch <- sapply(strsplit(sample_names, "_"), `[`, 2)
+metadata$species <- sapply(strsplit(sample_names, "_"), `[`, 3)
+
+metadata$Ssisolate <- sapply(strsplit(sample_names, "_"), `[`, 4)
+
+# Extract timepoint - FIXED VERSION
+# For NC samples: last element is "NC"
+# For time-course samples: first element is the timepoint number
+metadata$timepoint <- sapply(sample_names, function(x) {
+  parts <- strsplit(x, "_")[[1]]
+  # Check if last part is "NC" (non-challenged)
+  if(parts[length(parts)] == "NC") {
+    return("NC")
+  } else {
+    # Otherwise use the first number with "h" suffix
+    return(paste0(parts[1], "h"))
+  }
+})
+
+# Convert to factors with correct levels
+metadata$timepoint <- factor(metadata$timepoint, levels = c("NC", "24h", "48h", "96h"))
+metadata$batch <- factor(metadata$batch)
+
+print(head(metadata))
+cat("\nSamples per timepoint:\n")
+print(table(metadata$timepoint, useNA = "always"))
+```
+
+# Quality Control
+
+## Library Sizes
+
+```{r qc-library-sizes}
+lib_sizes <- colSums(counts_host)
+
+lib_df <- data.frame(
+  sample = names(lib_sizes),
+  size = lib_sizes / 1e6,
+  timepoint = metadata$timepoint
+)
+
+ggplot(lib_df, aes(x = sample, y = size, fill = timepoint)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Library Sizes - Host Genes",
+       x = "Sample", y = "Library size (millions)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6))
+
+cat(sprintf("\nLibrary sizes: %.2f - %.2f million reads\n", 
+            min(lib_sizes)/1e6, max(lib_sizes)/1e6))
+```
+
+## Pathogen Load Progression
+
+```{r pathogen-load}
+pathogen_reads <- colSums(counts_pathogen)
+host_reads <- colSums(counts_host)
+pathogen_pct <- 100 * pathogen_reads / (pathogen_reads + host_reads)
+
+pathogen_load_df <- data.frame(
+  sample = colnames(counts_all),
+  timepoint = metadata$timepoint,
+  pathogen_percent = pathogen_pct
+)
+
+ggplot(pathogen_load_df, aes(x = timepoint, y = pathogen_percent)) +
+  geom_boxplot(aes(fill = timepoint), outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 2) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Pathogen Load Progression in Soybean",
+       x = "Timepoint", y = "Pathogen reads (%)") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "none")
+
+# Summary statistics
+pathogen_summary <- pathogen_load_df %>% 
+  group_by(timepoint) %>% 
+  summarise(
+    mean = mean(pathogen_percent),
+    sd = sd(pathogen_percent),
+    min = min(pathogen_percent),
+    max = max(pathogen_percent)
+  )
+print(pathogen_summary)
+```
+
+# DESeq2 Analysis - Host Genes
+
+## Filter and Create DESeq2 Object
+
+```{r deseq2-host-setup}
+# IMPORTANT: Salmon produces non-integer counts, so we need to round them
+# DESeq2 requires integer counts
+counts_host <- round(counts_host)
+
+# Filter low count genes (keep genes with >=10 reads in >=3 samples)
+keep_host <- rowSums(counts_host >= 10) >= 3
+counts_host_filtered <- counts_host[keep_host, ]
+
+cat(sprintf("Host genes after filtering: %d (%.1f%% retained)\n",
+            nrow(counts_host_filtered),
+            100 * nrow(counts_host_filtered) / nrow(counts_host)))
+
+# Create DESeq2 dataset
+# NOTE: Using timepoint-only design to avoid potential batch nesting issues.
+# batch represents replicate numbers that may not be balanced across all conditions.
+dds_host <- DESeqDataSetFromMatrix(
+  countData = counts_host_filtered,
+  colData = metadata,
+  design = ~ timepoint
+)
+
+cat("\nRunning DESeq2 analysis for host genes...\n")
+dds_host <- DESeq(dds_host)
+cat("DESeq2 analysis complete!\n")
+```
+
+## PCA Plot
+
+```{r pca-host}
+vst_host <- vst(dds_host, blind = FALSE)
+
+pcaData <- plotPCA(vst_host, intgroup = c("timepoint", "batch"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+ggplot(pcaData, aes(PC1, PC2, color = timepoint, shape = batch)) +
+  geom_point(size = 4, alpha = 0.8) +
+  scale_color_brewer(palette = "Set1") +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  labs(title = "PCA - Host Genes (Gm_)") +
+  theme_bw(base_size = 14)
+```
+
+## Sample Distance Heatmap
+
+```{r sample-distances-host}
+sampleDists_host <- dist(t(assay(vst_host)))
+sampleDistMatrix_host <- as.matrix(sampleDists_host)
+rownames(sampleDistMatrix_host) <- paste(vst_host$timepoint, vst_host$batch, sep = "_")
+colnames(sampleDistMatrix_host) <- NULL
+
+pheatmap(sampleDistMatrix_host,
+         clustering_distance_rows = sampleDists_host,
+         clustering_distance_cols = sampleDists_host,
+         col = colorRampPalette(rev(brewer.pal(9, "Blues")))(255),
+         main = "Sample Distance Matrix - Host Genes")
+```
+
+## Differential Expression Results
+
+```{r de-host-comparisons}
+# Define contrasts
+contrasts_list <- list(
+  "24h_vs_NC" = c("timepoint", "24h", "NC"),
+  "48h_vs_NC" = c("timepoint", "48h", "NC"),
+  "96h_vs_NC" = c("timepoint", "96h", "NC"),
+  "48h_vs_24h" = c("timepoint", "48h", "24h"),
+  "96h_vs_48h" = c("timepoint", "96h", "48h")
+)
+
+# Store results
+results_host_list <- list()
+
+# Get results for each comparison
+for (name in names(contrasts_list)) {
+  res <- results(dds_host, contrast = contrasts_list[[name]], alpha = 0.05)
+  res <- res[order(res$padj), ]
+  results_host_list[[name]] <- res
+  
+  # Print summary
+  cat(sprintf("\n%s:\n", name))
+  cat(sprintf("  Significant genes (padj < 0.05): %d\n", 
+              sum(res$padj < 0.05, na.rm = TRUE)))
+  cat(sprintf("  Upregulated: %d\n", 
+              sum(res$padj < 0.05 & res$log2FoldChange > 0, na.rm = TRUE)))
+  cat(sprintf("  Downregulated: %d\n", 
+              sum(res$padj < 0.05 & res$log2FoldChange < 0, na.rm = TRUE)))
+}
+```
+
+## Volcano Plots - Host Genes
+
+```{r volcano-plots-host, fig.height=8}
+for (name in names(results_host_list)) {
+  res <- results_host_list[[name]]
+  
+  p <- EnhancedVolcano(res,
+                       lab = rownames(res),
+                       x = 'log2FoldChange',
+                       y = 'padj',
+                       title = paste('Host Genes:', name),
+                       pCutoff = 0.05,
+                       FCcutoff = 1.0,
+                       pointSize = 2.0,
+                       labSize = 3.0,
+                       max.overlaps = 15)
+  print(p)
+}
+```
+
+## Top Significant Genes Heatmap
+
+```{r heatmap-host-top}
+# Get top 50 genes from first comparison
+top_genes <- rownames(results_host_list[[1]])[1:50]
+mat <- assay(vst_host)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation
+annotation_col <- data.frame(
+  Timepoint = vst_host$timepoint,
+  Ss_isolate = vst_host$Ssisolate,
+  row.names = colnames(mat)
+)
+annotation_colors <- list(
+  Timepoint = c("NC" = "#2E8B57",      # Sea green
+                "24h" = "#FFD700",     # Gold
+                "48h" = "#FF6347",     # Tomato
+                "96h" = "#8B0000"),    # Dark red
+  
+  Ss_isolate = c("NC" = "#ffff47",         #yellow
+            "WISS47" = "#1f77b4",          # Blue
+            "JS659" = "#ff7f0e",          # Orange  
+            "BN172" = "#2ca02c",          # Green
+            "SSPotter" = "#8c564b",          # Brown
+            "MNSS6" = "#9467bd",          # Purple
+            "Xtra7" = "#d62728")          # Red
+)
+
+sample_order <- order(annotation_col$Ss_isolate, 
+                     match(annotation_col$Timepoint, c("NC", "24h", "48h", "96h")))
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+
+pheatmap(mat,
+         annotation_col = annotation_col,
+         annotation_colors = annotation_colors,  
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Host: Top 50 Significant Genes",
+         fontsize_row = 6)
+```
+
+```{r host_heatmap_rm1}
+
+# Remove specific samples by name (removed duplicates)
+samples_to_remove <- c("96_1_Gm_BN172","96_2_Gm_BN172","96_3_Gm_BN172", "96_1_Gm_SSPotter", "96_2_Gm_SSPotter", "96_3_Gm_SSPotter")
+samples_to_keep <- !colnames(vst_host) %in% samples_to_remove
+vst_host <- vst_host[, samples_to_keep]
+
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_host_list[[1]])[1:100]
+mat <- assay(vst_host)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with factors in desired order
+annotation_col <- data.frame(
+  Timepoint = factor(vst_host$timepoint, levels = c("NC", "24h", "48h", "96h")),
+  Ss_isolate = factor(vst_host$Ssisolate, levels = c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Annotation colors in the SAME ORDER as factor levels
+annotation_colors <- list(
+  Timepoint = c("NC" = "#91fffb",      
+                "24h" = "#FFD700",     
+                "48h" = "#FF6347",     
+                "96h" = "#8B0000"),    
+  
+  Ss_isolate = c("NC" = "#ffffad",         # Light yellow
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# Order samples by your custom isolate order, then by timepoint within each isolate
+sample_order <- order(match(annotation_col$Timepoint, c("NC", "24h", "48h", "96h"), 
+                     match(annotation_col$Ss_isolate, isolate_order)))
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,  
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,  # Keep FALSE if you want to maintain your custom order
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Host: Top 100 Significant Genes on soybean",
+         fontsize_row = 6)
+
+```
+
+```{r host_heatmap_rm2}
+
+# Remove specific samples by name (removed duplicates)
+samples_to_remove <- c("96_1_Gm_BN172","96_2_Gm_BN172","96_3_Gm_BN172", "96_1_Gm_SSPotter", "96_2_Gm_SSPotter", "96_3_Gm_SSPotter")
+samples_to_keep <- !colnames(vst_host) %in% samples_to_remove
+vst_host <- vst_host[, samples_to_keep]
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_host_list[[1]])[1:100]
+mat <- assay(vst_host)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with factors in desired order
+annotation_col <- data.frame(
+  Timepoint = factor(vst_host$timepoint, levels = c("NC", "24h", "48h", "96h")),
+  Ss_isolate = factor(vst_host$Ssisolate, levels = c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Annotation colors in the SAME ORDER as factor levels
+annotation_colors <- list(
+  Timepoint = c("NC" = "#91fffb",      
+                "24h" = "#FFD700",     
+                "48h" = "#FF6347",     
+                "96h" = "#8B0000"),    
+  
+  Ss_isolate = c("NC" = "#ffffad",         # Light yellow
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# CORRECTED: Order samples by isolate first, then by timepoint within each isolate
+sample_order <- order(
+  match(annotation_col$Ss_isolate, isolate_order),
+  match(annotation_col$Timepoint, c("NC", "24h", "48h", "96h"))
+)
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,  
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,  # Keep FALSE if you want to maintain your custom order
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Host: Top 100 Significant Genes on soybean",
+         fontsize_row = 6)
+
+
+```
+
+```{r host_heatmap_rm3}
+
+# Remove specific samples by name (removed duplicates)
+samples_to_remove <- c("96_1_Gm_BN172","96_2_Gm_BN172","96_3_Gm_BN172", "96_1_Gm_SSPotter", "96_2_Gm_SSPotter", "96_3_Gm_SSPotter")
+samples_to_keep <- !colnames(vst_host) %in% samples_to_remove
+vst_host <- vst_host[, samples_to_keep]
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_host_list[[1]])[1:100]
+mat <- assay(vst_host)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with factors in desired order
+annotation_col <- data.frame(
+  Timepoint = factor(vst_host$timepoint, levels = c("NC", "24h", "48h", "96h")),
+  Ss_isolate = factor(vst_host$Ssisolate, levels = c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Annotation colors in the SAME ORDER as factor levels
+annotation_colors <- list(
+  Timepoint = c("NC" = "#91fffb",      
+                "24h" = "#FFD700",     
+                "48h" = "#FF6347",     
+                "96h" = "#8B0000"),    
+  
+  Ss_isolate = c("NC" = "#ffffad",         # Light yellow
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# CORRECTED: Order samples by isolate first, then by timepoint within each isolate
+sample_order <- order(
+  match(annotation_col$Ss_isolate, isolate_order),
+  match(annotation_col$Timepoint, c("NC", "24h", "48h", "96h"))
+)
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,  
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,  # Keep FALSE if you want to maintain your custom order
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Host: Top 100 Significant Genes on soybean",
+         fontsize_row = 6)
+
+
+```
+
+
+# DESeq2 Analysis - Pathogen Genes
+
+## Filter and Create DESeq2 Object
+
+```{r deseq2-pathogen-setup}
+# IMPORTANT: Round Salmon counts to integers
+counts_pathogen <- round(counts_pathogen)
+
+# Filter low count genes
+keep_pathogen <- rowSums(counts_pathogen >= 10) >= 3
+counts_pathogen_filtered <- counts_pathogen[keep_pathogen, ]
+
+cat(sprintf("Pathogen genes after filtering: %d (%.1f%% retained)\n",
+            nrow(counts_pathogen_filtered),
+            100 * nrow(counts_pathogen_filtered) / nrow(counts_pathogen)))
+
+# Create DESeq2 dataset
+# NOTE: Using timepoint-only design to avoid potential batch nesting issues.
+dds_pathogen <- DESeqDataSetFromMatrix(
+  countData = counts_pathogen_filtered,
+  colData = metadata,
+  design = ~ timepoint
+)
+
+cat("\nRunning DESeq2 analysis for pathogen genes...\n")
+dds_pathogen <- DESeq(dds_pathogen)
+cat("DESeq2 analysis complete!\n")
+```
+
+## PCA Plot - Pathogen
+
+```{r pca-pathogen}
+vst_pathogen <- vst(dds_pathogen, blind = FALSE)
+
+pcaData <- plotPCA(vst_pathogen, intgroup = c("timepoint", "batch"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+ggplot(pcaData, aes(PC1, PC2, color = timepoint, shape = batch)) +
+  geom_point(size = 4, alpha = 0.8) +
+  scale_color_brewer(palette = "Set1") +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  labs(title = "PCA - Pathogen Genes (Ss_)") +
+  theme_bw(base_size = 14)
+```
+
+```{r pca-pathogen_2}
+# Create VST
+vst_pathogen <- vst(dds_pathogen, blind = FALSE)
+# Filter out NC samples from the data
+non_nc_samples <- vst_pathogen$timepoint != "NC"
+vst_pathogen_filtered <- vst_pathogen[, non_nc_samples]
+
+# Remove unused factor levels (like "NC") after subsetting
+colData(vst_pathogen_filtered) <- droplevels(colData(vst_pathogen_filtered))
+
+# Create PCA data with isolate and timepoint
+pcaData <- plotPCA(vst_pathogen_filtered, intgroup = c("Ssisolate", "timepoint"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+# Convert isolate to factor with desired order
+pcaData$isolate <- factor(pcaData$Ssisolate, levels = c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter"))
+
+# Define colors in the same order as factor levels
+isolate_colors <- c("WISS47" = "#1f77b4",     # Blue
+                   "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                   "MNSS6" = "#d62728",      # Red  
+                   "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                   "BN172" = "#e682fa",      # Purple/Pink
+                   "SSPotter" = "#8c564b")   # Brown
+
+# Create the plot
+ggplot(pcaData, aes(PC1, PC2, color = isolate, shape = timepoint)) +
+  geom_point(size = 4, alpha = 0.8) +
+  scale_color_manual(values = isolate_colors) +
+  scale_shape_manual(values = c("24h" = 16,    # Circle
+                               "48h" = 17,    # Triangle
+                               "96h" = 15)) + # Square
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  labs(title = "PCA: Pathogen Gene Expression by Isolate",
+       color = "Isolate",  # Legend title
+       shape = "Timepoint") +
+  theme_bw(base_size = 14)
+```
+
+
+## Differential Expression Results - Pathogen
+
+```{r de-pathogen-comparisons}
+# Store results
+results_pathogen_list <- list()
+
+# Get results for each comparison
+for (name in names(contrasts_list)) {
+  res <- results(dds_pathogen, contrast = contrasts_list[[name]], alpha = 0.05)
+  res <- res[order(res$padj), ]
+  results_pathogen_list[[name]] <- res
+  
+  # Print summary
+  cat(sprintf("\n%s:\n", name))
+  cat(sprintf("  Significant genes (padj < 0.05): %d\n", 
+              sum(res$padj < 0.05, na.rm = TRUE)))
+  cat(sprintf("  Upregulated: %d\n", 
+              sum(res$padj < 0.05 & res$log2FoldChange > 0, na.rm = TRUE)))
+  cat(sprintf("  Downregulated: %d\n", 
+              sum(res$padj < 0.05 & res$log2FoldChange < 0, na.rm = TRUE)))
+}
+```
+
+## Volcano Plots - Pathogen Genes
+
+```{r volcano-plots-pathogen, fig.height=8}
+for (name in names(results_pathogen_list)) {
+  res <- results_pathogen_list[[name]]
+  
+  p <- EnhancedVolcano(res,
+                       lab = rownames(res),
+                       x = 'log2FoldChange',
+                       y = 'padj',
+                       title = paste('Pathogen Genes:', name),
+                       pCutoff = 0.05,
+                       FCcutoff = 1.0,
+                       pointSize = 2.0,
+                       labSize = 3.0,
+                       max.overlaps = 15)
+  print(p)
+}
+```
+
+```{r pathogen_heatmap}
+# Get top 50 genes from first comparison
+top_genes <- rownames(results_pathogen_list[[1]])[1:50]
+mat <- assay(vst_pathogen)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation
+annotation_col <- data.frame(
+  Timepoint = vst_pathogen$timepoint,
+  Ss_isolate = vst_pathogen$Ssisolate,
+  row.names = colnames(mat)
+)
+annotation_colors <- list(
+  Timepoint = c("NC" = "#2E8B57",      # Sea green
+                "24h" = "#FFD700",     # Gold
+                "48h" = "#FF6347",     # Tomato
+                "96h" = "#8B0000"),    # Dark red
+  
+  Ss_isolate = c("NC" = "#ffff47",         #yellow
+            "WISS47" = "#1f77b4",          # Blue
+            "JS659" = "#ff7f0e",          # Orange  
+            "BN172" = "#2ca02c",          # Green
+            "SSPotter" = "#8c564b",          # Brown
+            "MNSS6" = "#9467bd",          # Purple
+            "Xtra7" = "#d62728")          # Red
+)
+
+sample_order <- order(annotation_col$Ss_isolate, 
+                     match(annotation_col$Timepoint, c("NC", "24h", "48h", "96h")))
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+
+pheatmap(mat,
+         annotation_col = annotation_col,
+         annotation_colors = annotation_colors,  
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Pathogen: Top 50 Significant Genes on soybean",
+         fontsize_row = 6)
+
+```
+
+```{r pathogen_heatmap_noNC}
+# Filter out NC samples from the data
+non_nc_samples <- vst_pathogen$timepoint != "NC"
+vst_pathogen_filtered <- vst_pathogen[, non_nc_samples]
+
+# Remove unused factor levels (like "NC") after subsetting
+colData(vst_pathogen_filtered) <- droplevels(colData(vst_pathogen_filtered))
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_pathogen_list[[1]])[1:100]
+mat <- assay(vst_pathogen_filtered)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with factors in desired order
+annotation_col <- data.frame(
+  Timepoint = factor(vst_pathogen_filtered$timepoint, levels = c("24h", "48h", "96h")),
+  Ss_isolate = factor(vst_pathogen_filtered$Ssisolate, levels = c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+
+# Updated annotation colors (removed NC from both)
+annotation_colors <- list(
+  Timepoint = c("24h" = "#FFD700",     # Gold
+                "48h" = "#FF6347",     # Tomato
+                "96h" = "#8B0000"),    # Dark red
+  
+  Ss_isolate = c(
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order (excluding NC since filtered out)
+isolate_order <- c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# Order samples by your custom isolate order, then by timepoint within each isolate
+sample_order <- order(match(annotation_col$Timepoint, c("NC", "24h", "48h", "96h"), 
+                     match(annotation_col$Ss_isolate, isolate_order)))
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,  
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,  # Turn off clustering to maintain time order
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Pathogen: Top 100 Significant Genes on soybean",
+         fontsize_row = 6)
+
+
+
+```
+
+```{r pathogen_heatmap_noNC_rm}
+# Filter out NC samples from the data
+non_nc_samples <- vst_pathogen$timepoint != "NC"
+vst_pathogen_filtered <- vst_pathogen[, non_nc_samples]
+
+# Remove specific samples by name (removed duplicates)
+samples_to_remove <- c("96_1_Gm_BN172","96_2_Gm_BN172","96_3_Gm_BN172", "96_1_Gm_SSPotter", "96_2_Gm_SSPotter", "96_3_Gm_SSPotter")
+samples_to_keep <- !colnames(vst_pathogen_filtered) %in% samples_to_remove
+vst_pathogen_filtered <- vst_pathogen_filtered[, samples_to_keep]
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_pathogen_list[[1]])[1:100]
+mat <- assay(vst_pathogen_filtered)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with factors in desired order
+annotation_col <- data.frame(
+  Timepoint = factor(vst_pathogen_filtered$timepoint, levels = c("24h", "48h", "96h")),
+  Ss_isolate = factor(vst_pathogen_filtered$Ssisolate, levels = c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Updated annotation colors (removed NC from both)
+annotation_colors <- list(
+  Timepoint = c("24h" = "#FFD700",     # Gold
+                "48h" = "#FF6347",     # Tomato
+                "96h" = "#8B0000"),    # Dark red
+  
+  Ss_isolate = c(
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# CORRECTED: Order samples by isolate first, then by timepoint within each isolate
+sample_order <- order(
+  match(annotation_col$Ss_isolate, isolate_order),
+  match(annotation_col$Timepoint, c("24h", "48h", "96h"))
+)
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Pathogen: Top 100 Significant Genes on soybean",
+         fontsize_row = 6)
+
+
+```
+
+```{r pathogen_heatmap_noNC_rm2}
+# Filter out NC samples from the data
+non_nc_samples <- vst_pathogen$timepoint != "NC"
+vst_pathogen_filtered <- vst_pathogen[, non_nc_samples]
+
+# Remove specific samples by name (removed duplicates)
+samples_to_remove <- c("96_1_Gm_BN172","96_2_Gm_BN172","96_3_Gm_BN172", "96_1_Gm_SSPotter", "96_2_Gm_SSPotter", "96_3_Gm_SSPotter")
+samples_to_keep <- !colnames(vst_pathogen_filtered) %in% samples_to_remove
+vst_pathogen_filtered <- vst_pathogen_filtered[, samples_to_keep]
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_pathogen_list[[1]])[1:100]
+mat <- assay(vst_pathogen_filtered)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with factors in desired order
+annotation_col <- data.frame(
+  Timepoint = factor(vst_pathogen_filtered$timepoint, levels = c("24h", "48h", "96h")),
+  Ss_isolate = factor(vst_pathogen_filtered$Ssisolate, levels = c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Updated annotation colors (removed NC from both)
+annotation_colors <- list(
+  Timepoint = c("24h" = "#FFD700",     # Gold
+                "48h" = "#FF6347",     # Tomato
+                "96h" = "#8B0000"),    # Dark red
+  
+  Ss_isolate = c(
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# CORRECTED: Order samples by isolate first, then by timepoint within each isolate
+sample_order <- order(
+  match(annotation_col$Ss_isolate, isolate_order),
+  match(annotation_col$Timepoint, c("24h", "48h", "96h"))
+)
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Pathogen: Top 100 Significant Genes on soybean",
+         fontsize_row = 6)
+
+
+
+```
+
+```{r pathogen_heatmap_noNC_rm2_2}
+# Filter out NC samples from the data
+non_nc_samples <- vst_pathogen$timepoint != "NC"
+vst_pathogen_filtered <- vst_pathogen[, non_nc_samples]
+
+# Remove specific samples by name (removed duplicates)
+samples_to_remove <- c("96_1_Gm_BN172","96_2_Gm_BN172","96_3_Gm_BN172", "96_1_Gm_SSPotter", "96_2_Gm_SSPotter", "96_3_Gm_SSPotter")
+samples_to_keep <- !colnames(vst_pathogen_filtered) %in% samples_to_remove
+vst_pathogen_filtered <- vst_pathogen_filtered[, samples_to_keep]
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_pathogen_list[[1]])[1:100]
+mat <- assay(vst_pathogen_filtered)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with factors in desired order
+annotation_col <- data.frame(
+  Timepoint = factor(vst_pathogen_filtered$timepoint, levels = c("24h", "48h", "96h")),
+  Ss_isolate = factor(vst_pathogen_filtered$Ssisolate, levels = c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Updated annotation colors (removed NC from both)
+annotation_colors <- list(
+  Timepoint = c("24h" = "#FFD700",     # Gold
+                "48h" = "#FF6347",     # Tomato
+                "96h" = "#8B0000"),    # Dark red
+  
+  Ss_isolate = c(
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# CORRECTED: Order samples by isolate first, then by timepoint within each isolate
+sample_order <- order(
+  match(annotation_col$Ss_isolate, isolate_order),
+  match(annotation_col$Timepoint, c("24h", "48h", "96h"))
+)
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Pathogen: Top 100 Significant Genes on soybean",
+         fontsize_row = 6)
+
+
+
+```
+
+
+```{r host_heatmap_24hpi}
+# Filter to keep only NC and 24hr timepoints
+samples_nc_24hr <- vst_host$timepoint %in% c("NC", "24h")
+vst_host_filtered <- vst_host[, samples_nc_24hr]
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_host_list[[1]])[1:100]
+mat <- assay(vst_host_filtered)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with only NC and 24hr timepoints
+annotation_col <- data.frame(
+  Timepoint = factor(vst_host_filtered$timepoint, levels = c("NC", "24h")),
+  Ss_isolate = factor(vst_host_filtered$Ssisolate, levels = c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Annotation colors for only NC and 24hr
+annotation_colors <- list(
+  Timepoint = c("NC" = "#91fffb",      # Light cyan
+                "24h" = "#FFD700"),    # Gold
+  
+  Ss_isolate = c("NC" = "#ffffad",         # Light yellow
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# Order samples by isolate first, then by timepoint within each isolate (NC, then 24h)
+sample_order <- order(
+  match(annotation_col$Ss_isolate, isolate_order),
+  match(annotation_col$Timepoint, c("NC", "24h"))
+)
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples - comparing NC vs 24hr
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,  
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,  # Keep FALSE to maintain custom order
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Host: Top 100 Significant Genes - NC vs 24hr Comparison",
+         fontsize_row = 6,
+         fontsize_col = 8)
+
+
+
+
+
+```
+
+```{r host_heatmap_48hpi}
+# Filter to keep only NC and 48hr timepoints
+samples_nc_48hr <- vst_host$timepoint %in% c("NC", "48h")
+vst_host_filtered <- vst_host[, samples_nc_48hr]
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_host_list[[1]])[1:100]
+mat <- assay(vst_host_filtered)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with only NC and 48hr timepoints
+annotation_col <- data.frame(
+  Timepoint = factor(vst_host_filtered$timepoint, levels = c("NC", "48h")),
+  Ss_isolate = factor(vst_host_filtered$Ssisolate, levels = c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Annotation colors for only NC and 48hr
+annotation_colors <- list(
+  Timepoint = c("NC" = "#91fffb",      # Light cyan
+                "48h" = "#FF6347"),    # Gold
+  
+  Ss_isolate = c("NC" = "#ffffad",         # Light yellow
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# Order samples by isolate first, then by timepoint within each isolate (NC, then 48h)
+sample_order <- order(
+  match(annotation_col$Ss_isolate, isolate_order),
+  match(annotation_col$Timepoint, c("NC", "48h"))
+)
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples - comparing NC vs 48hr
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,  
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,  # Keep FALSE to maintain custom order
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Host: Top 100 Significant Genes - NC vs 48hr Comparison",
+         fontsize_row = 6,
+         fontsize_col = 8)
+
+
+
+
+
+```
+
+
+```{r host_heatmap_96hpi}
+# Filter to keep only NC and 24hr timepoints
+samples_nc_96hr <- vst_host$timepoint %in% c("NC", "96h")
+vst_host_filtered <- vst_host[, samples_nc_96hr]
+
+# Remove specific samples by name (removed duplicates)
+samples_to_remove <- c("96_1_Gm_BN172","96_2_Gm_BN172","96_3_Gm_BN172", "96_1_Gm_SSPotter", "96_2_Gm_SSPotter", "96_3_Gm_SSPotter")
+samples_to_keep <- !colnames(vst_host) %in% samples_to_remove
+vst_host <- vst_host[, samples_to_keep]
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_host_list[[1]])[1:100]
+mat <- assay(vst_host_filtered)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with only NC and 96hr timepoints
+annotation_col <- data.frame(
+  Timepoint = factor(vst_host_filtered$timepoint, levels = c("NC", "96h")),
+  Ss_isolate = factor(vst_host_filtered$Ssisolate, levels = c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Annotation colors for only NC and 96hr
+annotation_colors <- list(
+  Timepoint = c("NC" = "#91fffb",      # Light cyan
+                "96h" = "#8B0000"),    # Gold
+  
+  Ss_isolate = c("NC" = "#ffffad",         # Light yellow
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# Order samples by isolate first, then by timepoint within each isolate (NC, then 96h)
+sample_order <- order(
+  match(annotation_col$Ss_isolate, isolate_order),
+  match(annotation_col$Timepoint, c("NC", "96h"))
+)
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples - comparing NC vs 96hr
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,  
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,  # Keep FALSE to maintain custom order
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Host: Top 100 Significant Genes - NC vs 96hr Comparison",
+         fontsize_row = 6,
+         fontsize_col = 8)
+
+
+
+
+
+```
+
+
+```{r pathogen_heatmap_24hpi}
+# Filter out NC samples AND keep only 24hr timepoint
+samples_24hr <- vst_pathogen$timepoint == "24h"
+vst_pathogen_24hr <- vst_pathogen[, samples_24hr]
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_pathogen_list[[1]])[1:100]
+mat_24hr <- assay(vst_pathogen_24hr)[top_genes, ]
+mat_24hr <- t(scale(t(mat_24hr)))  # Z-score normalization
+
+# Annotation with only 24hr samples
+annotation_col_24hr <- data.frame(
+  Ss_isolate = factor(vst_pathogen_24hr$Ssisolate, levels = c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat_24hr)
+)
+
+# Colors for isolates only (no timepoint needed since all are 24hr)
+annotation_colors_24hr <- list(
+  Ss_isolate = c(
+    "WISS47" = "#1f77b4",     # Blue
+    "JS659" = "#1f77b4",      # Blue (same as WISS47)
+    "MNSS6" = "#d62728",      # Red  
+    "Xtra7" = "#d62728",      # Red (same as MNSS6)
+    "BN172" = "#e682fa",      # Purple/Pink
+    "SSPotter" = "#8c564b")   # Brown
+)
+
+# Order samples by isolate for better comparison
+isolate_order <- c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+sample_order_24hr <- order(match(annotation_col_24hr$Ss_isolate, isolate_order))
+
+mat_24hr_ordered <- mat_24hr[, sample_order_24hr]
+annotation_col_24hr_ordered <- annotation_col_24hr[sample_order_24hr, , drop = FALSE]
+
+# Create heatmap for 24hr timepoint only
+pheatmap(mat_24hr_ordered,
+         annotation_col = annotation_col_24hr_ordered,
+         annotation_colors = annotation_colors_24hr,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,  # Keep FALSE to maintain isolate grouping
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Pathogen: Top 100 Significant Genes at 24hr Timepoint",
+         fontsize_row = 6,
+         fontsize_col = 8)  # Might want to increase column font size since fewer samples
+
+
+```
+
+```{r pathogen_heatmap_48hpi}
+# Filter out NC samples AND keep only 48hr timepoint
+samples_48hr <- vst_pathogen$timepoint == "48h"
+vst_pathogen_48hr <- vst_pathogen[, samples_48hr]
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_pathogen_list[[1]])[1:100]
+mat_48hr <- assay(vst_pathogen_48hr)[top_genes, ]
+mat_48hr <- t(scale(t(mat_48hr)))  # Z-score normalization
+
+# Annotation with only 48hr samples
+annotation_col_48hr <- data.frame(
+  Ss_isolate = factor(vst_pathogen_48hr$Ssisolate, levels = c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat_48hr)
+)
+
+# Colors for isolates only (no timepoint needed since all are 24hr)
+annotation_colors_48hr <- list(
+  Ss_isolate = c(
+    "WISS47" = "#1f77b4",     # Blue
+    "JS659" = "#1f77b4",      # Blue (same as WISS47)
+    "MNSS6" = "#d62728",      # Red  
+    "Xtra7" = "#d62728",      # Red (same as MNSS6)
+    "BN172" = "#e682fa",      # Purple/Pink
+    "SSPotter" = "#8c564b")   # Brown
+)
+
+# Order samples by isolate for better comparison
+isolate_order <- c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+sample_order_48hr <- order(match(annotation_col_48hr$Ss_isolate, isolate_order))
+
+mat_48hr_ordered <- mat_48hr[, sample_order_48hr]
+annotation_col_48hr_ordered <- annotation_col_48hr[sample_order_48hr, , drop = FALSE]
+
+# Create heatmap for 24hr timepoint only
+pheatmap(mat_48hr_ordered,
+         annotation_col = annotation_col_48hr_ordered,
+         annotation_colors = annotation_colors_48hr,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,  # Keep FALSE to maintain isolate grouping
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Pathogen: Top 100 Significant Genes at 48hr Timepoint",
+         fontsize_row = 6,
+         fontsize_col = 8)  # Might want to increase column font size since fewer samples
+
+
+```
+
+```{r pathogen_heatmap_96hpi}
+
+# Filter out NC samples from the data
+non_nc_samples <- vst_pathogen$timepoint != "NC"
+vst_pathogen_filtered <- vst_pathogen[, non_nc_samples]
+
+# Remove specific samples by name (removed duplicates)
+samples_to_remove <- c("96_1_Gm_BN172","96_2_Gm_BN172","96_3_Gm_BN172", "96_1_Gm_SSPotter", "96_2_Gm_SSPotter", "96_3_Gm_SSPotter")
+samples_to_keep <- !colnames(vst_pathogen_filtered) %in% samples_to_remove
+vst_pathogen <- vst_pathogen_filtered[, samples_to_keep]
+
+
+
+# Filter out NC samples AND keep only 96hr timepoint
+samples_96hr <- vst_pathogen$timepoint == "96h"
+vst_pathogen_96hr <- vst_pathogen[, samples_96hr]
+
+# Get top 100 genes from first comparison
+top_genes <- rownames(results_pathogen_list[[1]])[1:100]
+mat_96hr <- assay(vst_pathogen_96hr)[top_genes, ]
+mat_96hr <- t(scale(t(mat_96hr)))  # Z-score normalization
+
+# Annotation with only 96hr samples
+annotation_col_96hr <- data.frame(
+  Ss_isolate = factor(vst_pathogen_96hr$Ssisolate, levels = c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat_96hr)
+)
+
+# Colors for isolates only (no timepoint needed since all are 96hr)
+annotation_colors_96hr <- list(
+  Ss_isolate = c(
+    "WISS47" = "#1f77b4",     # Blue
+    "JS659" = "#1f77b4",      # Blue (same as WISS47)
+    "MNSS6" = "#d62728",      # Red  
+    "Xtra7" = "#d62728",      # Red (same as MNSS6)
+    "BN172" = "#e682fa",      # Purple/Pink
+    "SSPotter" = "#8c564b")   # Brown
+)
+
+# Order samples by isolate for better comparison
+isolate_order <- c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+sample_order_96hr <- order(match(annotation_col_96hr$Ss_isolate, isolate_order))
+
+mat_96hr_ordered <- mat_96hr[, sample_order_96hr]
+annotation_col_96hr_ordered <- annotation_col_96hr[sample_order_96hr, , drop = FALSE]
+
+# Create heatmap for 96hr timepoint only
+pheatmap(mat_96hr_ordered,
+         annotation_col = annotation_col_96hr_ordered,
+         annotation_colors = annotation_colors_96hr,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,  # Keep FALSE to maintain isolate grouping
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Pathogen: Top 100 Significant Genes at 96hr Timepoint",
+         fontsize_row = 6,
+         fontsize_col = 8)  # Might want to increase column font size since fewer samples
+
+
+```
+
+```{r PCA_pathogen_re}
+
+# Create VST
+vst_pathogen <- vst(dds_pathogen, blind = FALSE)
+
+# Filter out NC samples from the data
+non_nc_samples <- vst_pathogen$timepoint != "NC"
+vst_pathogen_filtered <- vst_pathogen[, non_nc_samples]
+
+# Create PCA data with isolate and timepoint
+pcaData <- plotPCA(vst_pathogen_filtered, intgroup = c("Ssisolate", "timepoint"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+# Convert isolate to factor with desired order
+pcaData$isolate <- factor(pcaData$Ssisolate, 
+                         levels = c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter"))
+
+# Define improved color palette - more distinct colors
+isolate_colors <- c(
+  "WISS47" = "#4169E1",    # Royal Blue
+  "JS659" = "#1f77b4",     # Steel Blue  
+  "MNSS6" = "#DC143C",     # Crimson Red
+  "Xtra7" = "#FF6B6B",     # Coral Red
+  "BN172" = "#DA70D6",     # Orchid Purple
+  "SSPotter" = "#8B4513"   # Saddle Brown
+)
+
+# Create the refined plot
+p <- ggplot(pcaData, aes(PC1, PC2, color = isolate, shape = timepoint)) +
+  
+  # Main data points with larger size and transparency
+  geom_point(size = 4, alpha = 0.8, stroke = 1.2) +
+  
+  # Custom color and shape scales
+  scale_color_manual(values = isolate_colors) +
+  scale_shape_manual(values = c("24h" = 16,    # Circle
+                               "48h" = 17,    # Triangle  
+                               "96h" = 15),   # Square
+                     name = "Timepoint") +
+  
+  # Axis labels with variance percentages
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  
+  # Title
+  labs(title = "PCA: Pathogen Gene Expression by Isolate",
+       color = "Isolate") +
+  
+  # Refined theme matching your first example
+  theme_void() +
+  theme(
+    # Transparent background
+    panel.background = element_rect(fill = "transparent", color = NA),
+    plot.background = element_rect(fill = "transparent", color = NA),
+    
+    # Axis styling
+    axis.text = element_text(size = 12, face = "bold", color = "black"),
+    axis.title = element_text(size = 12, face = "bold", color = "black"),
+    axis.line = element_line(color = "black", size = 0.5),
+    axis.ticks = element_line(color = "black", size = 0.5),
+    
+    # Title styling
+    plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0.5),
+    
+    # Legend styling
+    legend.position = "bottom",
+    legend.background = element_rect(fill = "white", alpha = 0.9, color = "grey80"),
+    legend.title = element_text(size = 11, face = "bold", color = "black"),
+    legend.text = element_text(size = 10, face = "bold", color = "black"),
+    legend.margin = margin(t = 10, r = 10, b = 10, l = 10),
+    legend.box = "horizontal",
+    legend.box.spacing = unit(1, "cm"),
+    
+    # Grid lines (subtle)
+    panel.grid.major = element_line(color = "grey90", alpha = 0.5, size = 0.5),
+    panel.grid.minor = element_line(color = "grey95", alpha = 0.3, size = 0.3),
+    
+    # Panel border
+    panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+    
+    # Margins
+    plot.margin = margin(t = 20, r = 20, b = 20, l = 20)
+  ) +
+  
+  # Arrange legends side by side and enhance them
+  guides(
+    color = guide_legend(
+      title = "Isolate",
+      override.aes = list(size = 4, alpha = 1),
+      title.position = "top",
+      title.hjust = 0.5,
+      nrow = 1
+    ),
+    shape = guide_legend(
+      title = "Timepoint", 
+      override.aes = list(size = 4, alpha = 1),
+      title.position = "top",
+      title.hjust = 0.5,
+      nrow = 1
+    )
+  ) +
+  
+  # Expand limits to ensure good spacing
+  expand_limits(x = c(min(pcaData$PC1) * 1.1, max(pcaData$PC1) * 1.1),
+                y = c(min(pcaData$PC2) * 1.1, max(pcaData$PC2) * 1.1))
+
+# Print the plot
+print(p)
+
+# Optional: Save with transparent background
+# ggsave("pca_pathogen_refined.png", plot = p, 
+#        width = 10, height = 8, dpi = 300, 
+#        bg = "transparent")
+
+
+```
+
+```{r PCA_pathogen_re_2}
+
+# Create VST
+vst_pathogen <- vst(dds_pathogen, blind = FALSE)
+
+# Filter out NC samples from the data
+non_nc_samples <- vst_pathogen$timepoint != "NC"
+vst_pathogen_filtered <- vst_pathogen[, non_nc_samples]
+
+# Create PCA data with isolate and timepoint
+pcaData <- plotPCA(vst_pathogen_filtered, intgroup = c("Ssisolate", "timepoint"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+# Convert isolate to factor with desired order
+pcaData$isolate <- factor(pcaData$Ssisolate, 
+                         levels = c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter"))
+
+# Create aggressiveness grouping based on your classification
+pcaData$aggressiveness <- case_when(
+  pcaData$Ssisolate %in% c("WISS47", "JS659") ~ "Low Aggressive",
+  pcaData$Ssisolate %in% c("MNSS6", "Xtra7") ~ "High Aggressive", 
+  pcaData$Ssisolate == "SSPotter" ~ "Soybean Specific",
+  pcaData$Ssisolate == "BN172" ~ "Sunflower Specific"
+)
+
+# Convert to factor with desired order
+pcaData$aggressiveness <- factor(pcaData$aggressiveness, 
+                                levels = c("Low Aggressive", "High Aggressive", 
+                                          "Soybean Specific", "Sunflower Specific"))
+
+# Define colors for isolates (consistent across both plots)
+isolate_colors <- c(
+  "WISS47" = "#4169E1",    # Blue
+  "JS659" = "#1f77b4",     # Steel Blue  
+  "MNSS6" = "#DC143C",     # Red
+  "Xtra7" = "#FF6B6B",     # Coral Red
+  "BN172" = "#DA70D6",     # Purple
+  "SSPotter" = "#8B4513"   # Brown
+)
+
+# Define colors for timepoints
+timepoint_colors <- c("24h" = "#FFD700", "48h" = "#FF6347", "96h" = "#8B0000")
+
+# Define colors for aggressiveness groups
+aggressiveness_colors <- c(
+  "Low Aggressive" = "#4169E1",      # Blue
+  "High Aggressive" = "#DC143C",     # Red  
+  "Soybean Specific" = "#8B4513",    # Brown
+  "Sunflower Specific" = "#DA70D6"   # Purple
+)
+
+# PLOT 1: Grouped by Timepoint
+p1 <- ggplot(pcaData, aes(PC1, PC2, color = isolate, shape = timepoint)) +
+  
+  # Add ellipses for timepoint grouping
+  stat_ellipse(aes(fill = timepoint, color = timepoint), 
+               alpha = 0.2, 
+               type = "norm", 
+               level = 0.68,
+               size = 1.2) +
+  
+  # Data points
+  geom_point(aes(color = isolate), size = 4, alpha = 0.8, stroke = 1.2) +
+  
+  # Color and shape scales
+  scale_color_manual(values = isolate_colors) +
+  scale_fill_manual(values = timepoint_colors) +
+  scale_shape_manual(values = c("24h" = 16, "48h" = 17, "96h" = 15)) +
+  
+  # Labels
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  labs(title = "PCA: Pathogen Gene Expression Grouped by Timepoint") +
+  
+  # Theme
+  theme_void() +
+  theme(
+    panel.background = element_rect(fill = "transparent", color = NA),
+    plot.background = element_rect(fill = "transparent", color = NA),
+    axis.text = element_text(size = 12, face = "bold", color = "black"),
+    axis.title = element_text(size = 12, face = "bold", color = "black"),
+    axis.line = element_line(color = "black", size = 0.5),
+    axis.ticks = element_line(color = "black", size = 0.5),
+    plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0.5),
+    legend.position = "bottom",
+    legend.background = element_rect(fill = "white", alpha = 0.9, color = "grey80"),
+    legend.title = element_text(size = 11, face = "bold", color = "black"),
+    legend.text = element_text(size = 10, face = "bold", color = "black"),
+    legend.box = "horizontal",
+    legend.box.spacing = unit(1, "cm"),
+    panel.grid.major = element_line(color = "grey90", alpha = 0.5, size = 0.5),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+    plot.margin = margin(t = 20, r = 20, b = 20, l = 20)
+  ) +
+  
+  # Guides
+  guides(
+    color = guide_legend(title = "Isolate", override.aes = list(size = 4), nrow = 1),
+    fill = guide_legend(title = "Timepoint Group", override.aes = list(alpha = 0.4), nrow = 1),
+    shape = guide_legend(title = "Timepoint", override.aes = list(size = 4), nrow = 1)
+  )
+
+# PLOT 2: Grouped by Aggressiveness
+p2 <- ggplot(pcaData, aes(PC1, PC2, color = isolate, shape = timepoint)) +
+  
+  # Add ellipses for aggressiveness grouping
+  stat_ellipse(aes(fill = aggressiveness, color = aggressiveness), 
+               alpha = 0.2, 
+               type = "norm", 
+               level = 0.68,
+               size = 1.2) +
+  
+  # Data points
+  geom_point(aes(color = isolate), size = 4, alpha = 0.8, stroke = 1.2) +
+  
+  # Color and shape scales
+  scale_color_manual(values = isolate_colors) +
+  scale_fill_manual(values = aggressiveness_colors) +
+  scale_shape_manual(values = c("24h" = 16, "48h" = 17, "96h" = 15)) +
+  
+  # Labels
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  labs(title = "PCA: Pathogen Gene Expression Grouped by Aggressiveness") +
+  
+  # Theme
+  theme_void() +
+  theme(
+    panel.background = element_rect(fill = "transparent", color = NA),
+    plot.background = element_rect(fill = "transparent", color = NA),
+    axis.text = element_text(size = 12, face = "bold", color = "black"),
+    axis.title = element_text(size = 12, face = "bold", color = "black"),
+    axis.line = element_line(color = "black", size = 0.5),
+    axis.ticks = element_line(color = "black", size = 0.5),
+    plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0.5),
+    legend.position = "bottom",
+    legend.background = element_rect(fill = "white", alpha = 0.9, color = "grey80"),
+    legend.title = element_text(size = 11, face = "bold", color = "black"),
+    legend.text = element_text(size = 10, face = "bold", color = "black"),
+    legend.box = "horizontal",
+    legend.box.spacing = unit(1, "cm"),
+    panel.grid.major = element_line(color = "grey90", alpha = 0.5, size = 0.5),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+    plot.margin = margin(t = 20, r = 20, b = 20, l = 20)
+  ) +
+  
+  # Guides
+  guides(
+    color = guide_legend(title = "Isolate", override.aes = list(size = 4), nrow = 1),
+    fill = guide_legend(title = "Aggressiveness Group", override.aes = list(alpha = 0.4), nrow = 1),
+    shape = guide_legend(title = "Timepoint", override.aes = list(size = 4), nrow = 1)
+  )
+
+# Print both plots
+print(p1)
+print(p2)
+
+# Optional: Save both plots
+# ggsave("pca_timepoint_grouped.png", plot = p1, 
+#        width = 12, height = 8, dpi = 300, bg = "transparent")
+# ggsave("pca_aggressiveness_grouped.png", plot = p2, 
+#        width = 12, height = 8, dpi = 300, bg = "transparent")
+
+# Optional: Create combined plot using patchwork
+# library(patchwork)
+# combined_plot <- p1 / p2
+# print(combined_plot)
+
+```
+
+
+
+# Summary
+
+```{r summary}
+cat("=" %>% rep(80) %>% paste(collapse = ""), "\n")
+cat("SOYBEAN-SCLEROTINIA DUAL RNA-SEQ ANALYSIS SUMMARY\n")
+cat("=" %>% rep(80) %>% paste(collapse = ""), "\n\n")
+
+cat("INPUT DATA:\n")
+cat(sprintf("Total genes: %d\n", nrow(counts_all)))
+cat(sprintf("Host genes (Gm_): %d\n", nrow(counts_host)))
+cat(sprintf("Pathogen genes (Ss_): %d\n", nrow(counts_pathogen)))
+cat(sprintf("Samples analyzed: %d\n", ncol(counts_all)))
+
+cat("\nHOST GENE DIFFERENTIAL EXPRESSION:\n")
+for (name in names(results_host_list)) {
+  res <- results_host_list[[name]]
+  cat(sprintf("\n%s: %d significant genes\n", name, 
+              sum(res$padj < 0.05, na.rm = TRUE)))
+}
+
+cat("\nPATHOGEN GENE DIFFERENTIAL EXPRESSION:\n")
+for (name in names(results_pathogen_list)) {
+  res <- results_pathogen_list[[name]]
+  cat(sprintf("\n%s: %d significant genes\n", name, 
+              sum(res$padj < 0.05, na.rm = TRUE)))
+}
+```
+
+# Export Results
+
+```{r export-results, eval=FALSE}
+# Create output directory
+dir.create("soybean_results", showWarnings = FALSE)
+
+# Save normalized counts
+write.csv(counts(dds_host, normalized = TRUE),
+          "soybean_results/normalized_counts_HOST.csv")
+write.csv(counts(dds_pathogen, normalized = TRUE),
+          "soybean_results/normalized_counts_PATHOGEN.csv")
+
+# Save DE results
+for (name in names(results_host_list)) {
+  write.csv(as.data.frame(results_host_list[[name]]),
+            paste0("soybean_results/HOST_", name, "_all.csv"))
+}
+
+for (name in names(results_pathogen_list)) {
+  write.csv(as.data.frame(results_pathogen_list[[name]]),
+            paste0("soybean_results/PATHOGEN_", name, "_all.csv"))
+}
+
+cat("Results exported to soybean_results/\n")
+```
+
+
+```{r all host sig DEGs}
+# Filter to only genes that exist in the vst_host assay
+top_genes <- rownames(results_host_list[[1]])[
+  which(results_host_list[[1]]$padj < 0.05 & 
+        abs(results_host_list[[1]]$log2FoldChange) > 1)
+]
+
+# Keep only genes present in the assay
+top_genes <- intersect(top_genes, rownames(assay(vst_host_filtered)))
+
+mat <- assay(vst_host)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with factors in desired order
+annotation_col <- data.frame(
+  Timepoint = factor(vst_host$timepoint, levels = c("NC", "24h", "48h", "96h")),
+  Ss_isolate = factor(vst_host$Ssisolate, levels = c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Annotation colors in the SAME ORDER as factor levels
+annotation_colors <- list(
+  Timepoint = c("NC" = "#91fffb",      
+                "24h" = "#FFD700",     
+                "48h" = "#FF6347",     
+                "96h" = "#8B0000"),    
+  
+  Ss_isolate = c("NC" = "#ffffad",         # Light yellow
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# CORRECTED: Order samples by isolate first, then by timepoint within each isolate
+sample_order <- order(
+  match(annotation_col$Ss_isolate, isolate_order),
+  match(annotation_col$Timepoint, c("NC", "24h", "48h", "96h"))
+)
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,  
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,  # Keep FALSE if you want to maintain your custom order
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Host Significant Genes on Soybean",
+         fontsize_row = 6)
+
+
+
+
+
+```
+
+```{r all pathogen sig DEGs}
+# Filter out NC samples from the data
+non_nc_samples <- vst_pathogen$timepoint != "NC"
+vst_pathogen_filtered <- vst_pathogen[, non_nc_samples]
+
+# Remove specific samples by name (removed duplicates)
+samples_to_remove <- c("96_1_Gm_BN172","96_2_Gm_BN172","96_3_Gm_BN172", "96_1_Gm_SSPotter", "96_2_Gm_SSPotter", "96_3_Gm_SSPotter")
+samples_to_keep <- !colnames(vst_pathogen_filtered) %in% samples_to_remove
+vst_pathogen_filtered <- vst_pathogen_filtered[, samples_to_keep]
+
+# Get ALL significant DEGs from first comparison
+top_genes <- rownames(results_pathogen_list[[1]])[
+  which(results_pathogen_list[[1]]$padj < 0.05 & 
+        abs(results_pathogen_list[[1]]$log2FoldChange) > 1)
+]
+
+# Keep only genes present in the assay
+top_genes <- intersect(top_genes, rownames(assay(vst_pathogen_filtered)))
+
+mat <- assay(vst_pathogen_filtered)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+mat <- assay(vst_pathogen_filtered)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with factors in desired order
+annotation_col <- data.frame(
+  Timepoint = factor(vst_pathogen_filtered$timepoint, levels = c("24h", "48h", "96h")),
+  Ss_isolate = factor(vst_pathogen_filtered$Ssisolate, levels = c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Updated annotation colors (removed NC from both)
+annotation_colors <- list(
+  Timepoint = c("24h" = "#FFD700",     # Gold
+                "48h" = "#FF6347",     # Tomato
+                "96h" = "#8B0000"),    # Dark red
+  
+  Ss_isolate = c(
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# CORRECTED: Order samples by isolate first, then by timepoint within each isolate
+sample_order <- order(
+  match(annotation_col$Ss_isolate, isolate_order),
+  match(annotation_col$Timepoint, c("24h", "48h", "96h"))
+)
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Pathogen Significant Genes on Soybean",
+         fontsize_row = 6)
+
+```
+
+
+```{r all host sig DEGs_no_col_cluster}
+# Filter to only genes that exist in the vst_host assay
+top_genes <- rownames(results_host_list[[1]])[
+  which(results_host_list[[1]]$padj < 0.05 & 
+        abs(results_host_list[[1]]$log2FoldChange) > 1)
+]
+
+# Keep only genes present in the assay
+top_genes <- intersect(top_genes, rownames(assay(vst_host_filtered)))
+
+mat <- assay(vst_host)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with factors in desired order
+annotation_col <- data.frame(
+  Timepoint = factor(vst_host$timepoint, levels = c("NC", "24h", "48h", "96h")),
+  Ss_isolate = factor(vst_host$Ssisolate, levels = c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Annotation colors in the SAME ORDER as factor levels
+annotation_colors <- list(
+  Timepoint = c("NC" = "#91fffb",      
+                "24h" = "#FFD700",     
+                "48h" = "#FF6347",     
+                "96h" = "#8B0000"),    
+  
+  Ss_isolate = c("NC" = "#ffffad",         # Light yellow
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("NC", "WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# CORRECTED: Order samples by isolate first, then by timepoint within each isolate
+sample_order <- order(
+  match(annotation_col$Ss_isolate, isolate_order),
+  match(annotation_col$Timepoint, c("NC", "24h", "48h", "96h"))
+)
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,  
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,  # Keep FALSE if you want to maintain your custom order
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Host Significant Genes on Soybean",
+         fontsize_row = 6)
+
+
+
+
+
+```
+
+```{r all pathogen sig DEGs_no_col_cluster}
+# Filter out NC samples from the data
+non_nc_samples <- vst_pathogen$timepoint != "NC"
+vst_pathogen_filtered <- vst_pathogen[, non_nc_samples]
+
+# Remove specific samples by name (removed duplicates)
+samples_to_remove <- c("96_1_Gm_BN172","96_2_Gm_BN172","96_3_Gm_BN172", "96_1_Gm_SSPotter", "96_2_Gm_SSPotter", "96_3_Gm_SSPotter")
+samples_to_keep <- !colnames(vst_pathogen_filtered) %in% samples_to_remove
+vst_pathogen_filtered <- vst_pathogen_filtered[, samples_to_keep]
+
+# Get ALL significant DEGs from first comparison
+top_genes <- rownames(results_pathogen_list[[1]])[
+  which(results_pathogen_list[[1]]$padj < 0.05 & 
+        abs(results_pathogen_list[[1]]$log2FoldChange) > 1)
+]
+
+# Keep only genes present in the assay
+top_genes <- intersect(top_genes, rownames(assay(vst_pathogen_filtered)))
+
+mat <- assay(vst_pathogen_filtered)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+mat <- assay(vst_pathogen_filtered)[top_genes, ]
+mat <- t(scale(t(mat)))  # Z-score normalization
+
+# Annotation with factors in desired order
+annotation_col <- data.frame(
+  Timepoint = factor(vst_pathogen_filtered$timepoint, levels = c("24h", "48h", "96h")),
+  Ss_isolate = factor(vst_pathogen_filtered$Ssisolate, levels = c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")),
+  row.names = colnames(mat)
+)
+
+# Updated annotation colors (removed NC from both)
+annotation_colors <- list(
+  Timepoint = c("24h" = "#FFD700",     # Gold
+                "48h" = "#FF6347",     # Tomato
+                "96h" = "#8B0000"),    # Dark red
+  
+  Ss_isolate = c(
+                 "WISS47" = "#1f77b4",     # Blue
+                 "JS659" = "#1f77b4",      # Blue (same as WISS47)
+                 "MNSS6" = "#d62728",      # Red  
+                 "Xtra7" = "#d62728",      # Red (same as MNSS6)
+                 "BN172" = "#e682fa",      # Purple/Pink
+                 "SSPotter" = "#8c564b")   # Brown
+)
+
+# Define your preferred isolate order
+isolate_order <- c("WISS47", "JS659", "MNSS6", "Xtra7", "BN172", "SSPotter")
+
+# CORRECTED: Order samples by isolate first, then by timepoint within each isolate
+sample_order <- order(
+  match(annotation_col$Ss_isolate, isolate_order),
+  match(annotation_col$Timepoint, c("24h", "48h", "96h"))
+)
+
+mat_ordered <- mat[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, , drop = FALSE]
+
+# Create heatmap with ordered samples
+pheatmap(mat_ordered,
+         annotation_col = annotation_col_ordered,
+         annotation_colors = annotation_colors,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-2, 2, length.out = 101),
+         main = "Pathogen Significant Genes on Soybean",
+         fontsize_row = 6)
+
+```
+
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```

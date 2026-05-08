@@ -1,0 +1,930 @@
+---
+title: "Isolate Pairwise Comparison & Aggressiveness Grouping Confirmation"
+subtitle: "TukeyHSD + Bootstrap clustering (emmeans-free approach)"
+author: "Analysis by wan00965"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 7)
+```
+
+# Overview
+
+**Problem:** The `emmeans` + `cld()` approach failed on all genes (1000/1000 errors)
+because the design matrix becomes rank-deficient — empty cells in the
+isolate × timepoint × block crossing cause the vcov matrix to be singular.
+
+**Solution:** This notebook replaces emmeans with three robust alternatives:
+
+1. **TukeyHSD via `aov()`** — tolerates unbalanced designs; produces all 15 pairwise comparisons per gene
+2. **Pairwise significance summary** — for each isolate pair, what % of genes show a sig difference?
+3. **Bootstrap clustering** (1000 resamples) — how often do hypothesised groups co-cluster?
+
+Plus: planned contrasts computed directly from group means + pooled MSE (no emmeans).
+
+**Hypothesis — Expected grouping:**
+
+| Group | Isolates |
+|-------|----------|
+| Low aggressive | WISS47, JS659 |
+| High aggressive | MNSS6, Xtra7 |
+| Soybean-specific | SSPotter |
+| Sunflower-specific | BN172 |
+
+**Four datasets:** A. Pathogen on soybean, B. Pathogen on sunflower, C. Soybean host, D. Sunflower host
+
+# Setup
+
+```{r load-libraries}
+library(DESeq2)
+library(car)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(pheatmap)
+library(RColorBrewer)
+library(vegan)
+
+cat("All libraries loaded.\n")
+```
+
+```{r set-directory}
+# TODO: set the working directory to the folder containing your STAR count matrices and DEG CSVs
+# setwd("/path/to/your/STAR/output")
+dir.create("isolate_pairwise_results", showWarnings = FALSE)
+```
+
+# Load Data
+
+```{r load-counts}
+counts_soy_host     <- read.table("soybean_host_only_STAR.txt",
+                                   header = TRUE, row.names = 1, check.names = FALSE)
+counts_soy_pathogen <- read.table("pathogen_soybean_STAR.txt",
+                                   header = TRUE, row.names = 1, check.names = FALSE)
+counts_sun_host     <- read.table("sunflower_host_only_STAR.txt",
+                                   header = TRUE, row.names = 1, check.names = FALSE)
+counts_sun_pathogen <- read.table("pathogen_sunflower_STAR.txt",
+                                   header = TRUE, row.names = 1, check.names = FALSE)
+
+cat(sprintf("Soybean:   %d host genes, %d pathogen genes, %d samples\n",
+            nrow(counts_soy_host), nrow(counts_soy_pathogen), ncol(counts_soy_host)))
+cat(sprintf("Sunflower: %d host genes, %d pathogen genes, %d samples\n",
+            nrow(counts_sun_host), nrow(counts_sun_pathogen), ncol(counts_sun_host)))
+```
+
+## Build Metadata
+
+```{r build-metadata}
+build_metadata <- function(sample_names) {
+  meta <- data.frame(
+    sample    = sample_names,
+    timepoint = sapply(sample_names, function(x) {
+      parts <- strsplit(x, "_")[[1]]
+      if (parts[length(parts)] == "NC") "NC" else paste0(parts[1], "h")
+    }),
+    block   = sapply(strsplit(sample_names, "_"), `[`, 2),
+    isolate = sapply(strsplit(sample_names, "_"), `[`, 4),
+    row.names = sample_names,
+    stringsAsFactors = FALSE
+  )
+  block_remap <- c("4" = "1", "5" = "2", "6" = "3")
+  idx <- meta$block %in% names(block_remap)
+  if (any(idx)) {
+    cat(sprintf("  Remapping %d samples: block 4->1, 5->2, 6->3\n", sum(idx)))
+    meta$block[idx] <- block_remap[meta$block[idx]]
+  }
+  meta$aggr_group <- dplyr::case_when(
+    meta$isolate %in% c("WISS47", "JS659")  ~ "Low",
+    meta$isolate %in% c("MNSS6", "Xtra7")   ~ "High",
+    meta$isolate == "SSPotter"               ~ "Soy-specific",
+    meta$isolate == "BN172"                  ~ "Sun-specific",
+    meta$isolate == "NC"                     ~ "NC",
+    TRUE                                     ~ NA_character_
+  )
+  meta$timepoint  <- factor(meta$timepoint,  levels = c("NC","24h","48h","96h"))
+  meta$block      <- factor(meta$block, levels = c("1","2","3"))
+  meta$isolate    <- factor(meta$isolate,
+                            levels = c("NC","WISS47","JS659","MNSS6","Xtra7","BN172","SSPotter"))
+  meta$aggr_group <- factor(meta$aggr_group,
+                            levels = c("Low","High","Soy-specific","Sun-specific","NC"))
+  return(meta)
+}
+
+meta_soy <- build_metadata(colnames(counts_soy_host))
+meta_sun <- build_metadata(colnames(counts_sun_host))
+
+cat("── Soybean samples ──\n")
+print(table(meta_soy$isolate, meta_soy$timepoint))
+cat("\n── Sunflower samples ──\n")
+print(table(meta_sun$isolate, meta_sun$timepoint))
+```
+
+## Prepare VST Objects (exclude NC)
+
+```{r prepare-vst}
+make_vst <- function(counts, metadata, min_count = 10, min_samples = 3) {
+  counts <- round(counts)
+  keep   <- rowSums(counts >= min_count) >= min_samples
+  counts <- counts[keep, ]
+  dds    <- DESeqDataSetFromMatrix(countData = counts,
+                                   colData   = metadata,
+                                   design    = ~ timepoint)
+  dds    <- DESeq(dds)
+  # varianceStabilizingTransformation() instead of vst() so this works on
+  # the small pathogen matrices (vst() needs >=1000 genes with mean count > 5
+  # to subsample for parametric fit; pathogen matrices are typically smaller).
+  vst_obj <- varianceStabilizingTransformation(dds, blind = FALSE)
+  idx     <- vst_obj$timepoint != "NC"
+  vst_obj <- vst_obj[, idx]
+  colData(vst_obj) <- droplevels(colData(vst_obj))
+  return(vst_obj)
+}
+
+cat("Building VST objects (this takes a few minutes)...\n\n")
+
+vst_soy_pathogen <- make_vst(counts_soy_pathogen, meta_soy)
+cat(sprintf("Soybean pathogen: %d genes x %d samples\n",
+            nrow(vst_soy_pathogen), ncol(vst_soy_pathogen)))
+
+vst_sun_pathogen <- make_vst(counts_sun_pathogen, meta_sun)
+cat(sprintf("Sunflower pathogen: %d genes x %d samples\n",
+            nrow(vst_sun_pathogen), ncol(vst_sun_pathogen)))
+
+vst_soy_host <- make_vst(counts_soy_host, meta_soy)
+cat(sprintf("Soybean host: %d genes x %d samples\n",
+            nrow(vst_soy_host), ncol(vst_soy_host)))
+
+vst_sun_host <- make_vst(counts_sun_host, meta_sun)
+cat(sprintf("Sunflower host: %d genes x %d samples\n",
+            nrow(vst_sun_host), ncol(vst_sun_host)))
+```
+
+# Reusable Engine
+
+## Color Palettes
+
+```{r define-colors}
+isolate_colors <- c("WISS47" = "#3ACAFF", "JS659"   = "#00BFB2",
+                     "MNSS6"  = "#FF3173", "Xtra7"   = "#FF5F3A",
+                     "BN172"  = "#e682fa", "SSPotter" = "#8c564b")
+aggr_colors <- c("Low" = "#1f77b4", "High" = "#d62728",
+                  "Soy-specific" = "#8c564b", "Sun-specific" = "#e682fa")
+tp_colors <- c("24h" = "#FFD700", "48h" = "#FF6347", "96h" = "#8B0000")
+```
+
+## Helper Functions
+
+```{r helper-functions}
+# ── Check whether block term is estimable ──
+check_block_ok <- function(meta, expr_vec) {
+  test_fit <- lm(expr_vec ~ isolate + timepoint + block, data = meta)
+  av       <- anova(test_fit)
+  tp_df    <- av["timepoint", "Df"]
+  expected <- nlevels(meta$timepoint) - 1
+  return(tp_df == expected)
+}
+
+# ── Safe ANOVA: tries Type III, II, then I ──
+safe_anova <- function(fit) {
+  av <- tryCatch({
+    options(contrasts = c("contr.sum", "contr.poly"))
+    car::Anova(fit, type = "III")
+  }, error = function(e) NULL)
+  if (!is.null(av)) return(av)
+  av <- tryCatch(car::Anova(fit, type = "II"), error = function(e) NULL)
+  if (!is.null(av)) return(av)
+  tryCatch(anova(fit), error = function(e) NULL)
+}
+
+# ── Extract F and p from any anova-like table ──
+extract_stats <- function(av, term) {
+  av_df <- as.data.frame(av)
+  f_col <- grep("^F", colnames(av_df), value = TRUE)[1]
+  p_col <- grep("Pr\\(", colnames(av_df), value = TRUE)[1]
+  if (term %in% rownames(av_df) && !is.na(f_col) && !is.na(p_col)) {
+    return(c(F_val = av_df[term, f_col], p_val = av_df[term, p_col]))
+  }
+  c(F_val = NA_real_, p_val = NA_real_)
+}
+
+# ── Build CLD from TukeyHSD pairwise p-values ──
+# Uses a greedy clique-cover on the "not-significantly-different" graph
+build_cld_from_tukey <- function(tk_df, isolate_levels, alpha = 0.05) {
+  n <- length(isolate_levels)
+
+  # Build adjacency: TRUE = not significantly different
+  nonsig_adj <- matrix(TRUE, n, n,
+                       dimnames = list(isolate_levels, isolate_levels))
+  for (r in seq_len(nrow(tk_df))) {
+    if (tk_df$p_tukey[r] < alpha) {
+      pair <- strsplit(tk_df$contrast[r], "-")[[1]]
+      if (all(pair %in% isolate_levels)) {
+        nonsig_adj[pair[1], pair[2]] <- FALSE
+        nonsig_adj[pair[2], pair[1]] <- FALSE
+      }
+    }
+  }
+
+  # Greedy clique cover → letter groups
+  letters_used <- 0
+  letter_assign <- setNames(rep("", n), isolate_levels)
+  remaining <- isolate_levels
+
+  while (length(remaining) > 0) {
+    letters_used <- letters_used + 1
+    ltr <- letters[letters_used]
+
+    # Build a maximal clique starting from first remaining isolate
+    clique <- remaining[1]
+    for (iso in remaining[-1]) {
+      if (all(nonsig_adj[iso, clique])) {
+        clique <- c(clique, iso)
+      }
+    }
+    for (iso in clique) {
+      letter_assign[iso] <- paste0(letter_assign[iso], ltr)
+    }
+    remaining <- setdiff(remaining, clique)
+    if (letters_used > 20) break
+  }
+  return(letter_assign)
+}
+
+# ── Check if two isolates share a CLD letter ──
+check_share_letter <- function(cld_g, iso1, iso2) {
+  g1 <- cld_g$group[cld_g$isolate == iso1]
+  g2 <- cld_g$group[cld_g$isolate == iso2]
+  if (length(g1) == 0 || length(g2) == 0) return(NA)
+  l1 <- strsplit(g1, "")[[1]]
+  l2 <- strsplit(g2, "")[[1]]
+  length(intersect(l1, l2)) > 0
+}
+```
+
+## Core Pairwise Analysis Engine
+
+```{r define-engine}
+run_pairwise_analysis <- function(vst_obj, label, out_prefix) {
+
+  expr_mat <- assay(vst_obj)
+  meta     <- as.data.frame(colData(vst_obj))
+  n_genes  <- nrow(expr_mat)
+  isolates <- levels(droplevels(meta$isolate))
+
+  cat(sprintf("\n%s\n%s: %d genes x %d samples\n%s\n",
+              paste(rep("=", 70), collapse = ""),
+              label, n_genes, ncol(expr_mat),
+              paste(rep("=", 70), collapse = "")))
+  cat("  Isolate levels:", paste(isolates, collapse = ", "), "\n")
+
+  # Check block estimability
+  use_block <- check_block_ok(meta, expr_mat[1, ])
+  fml_str   <- if (use_block) "isolate + timepoint + block" else "isolate + timepoint"
+  cat(sprintf("  Model: expr ~ %s\n", fml_str))
+
+  # ── 1. Per-gene ANOVA ──────────────────────────────────────────────────
+  cat("  Running per-gene ANOVA...\n")
+
+  anova_list <- lapply(seq_len(n_genes), function(i) {
+    df  <- data.frame(expr = expr_mat[i, ], meta)
+    fit <- tryCatch(lm(as.formula(paste("expr ~", fml_str)), data = df),
+                    error = function(e) NULL)
+    if (is.null(fit)) return(NULL)
+    av <- safe_anova(fit)
+    if (is.null(av)) return(NULL)
+
+    iso <- extract_stats(av, "isolate")
+    tp  <- extract_stats(av, "timepoint")
+    blk <- if (use_block) extract_stats(av, "block") else c(F_val = NA, p_val = NA)
+
+    data.frame(gene = rownames(expr_mat)[i],
+               F_isolate = iso["F_val"],  p_isolate = iso["p_val"],
+               F_timepoint = tp["F_val"], p_timepoint = tp["p_val"],
+               F_block = blk["F_val"],    p_block = blk["p_val"],
+               stringsAsFactors = FALSE, row.names = NULL)
+  })
+
+  pergene <- do.call(rbind, Filter(Negate(is.null), anova_list))
+  pergene$padj_isolate   <- p.adjust(pergene$p_isolate, method = "BH")
+  pergene$padj_timepoint <- p.adjust(pergene$p_timepoint, method = "BH")
+  pergene$padj_block     <- p.adjust(pergene$p_block, method = "BH")
+
+  n_sig <- sum(pergene$padj_isolate < 0.05, na.rm = TRUE)
+  cat(sprintf("  Isolate-sig genes: %d / %d (%.1f%%)\n",
+              n_sig, nrow(pergene), 100 * n_sig / nrow(pergene)))
+
+  write.csv(pergene,
+            file.path("isolate_pairwise_results",
+                      paste0(out_prefix, "_pergene_ANOVA.csv")),
+            row.names = FALSE)
+
+  if (n_sig == 0) {
+    cat("  No significant isolate-effect genes. Skipping pairwise.\n")
+    return(invisible(list(pergene = pergene)))
+  }
+
+  sig_genes <- pergene$gene[pergene$padj_isolate < 0.05]
+
+  # ── 2. TukeyHSD via aov() ─────────────────────────────────────────────
+  cat(sprintf("  Running TukeyHSD on %d sig genes...\n", length(sig_genes)))
+
+  tukey_list <- list()
+  tukey_errs <- 0
+
+  for (g in sig_genes) {
+    ok <- tryCatch({
+      df  <- data.frame(expr = expr_mat[g, ], meta)
+      fit <- aov(as.formula(paste("expr ~", fml_str)), data = df)
+      tk  <- TukeyHSD(fit, which = "isolate", conf.level = 0.95)
+      tk_df <- as.data.frame(tk$isolate)
+      tk_df$contrast <- rownames(tk_df)
+      tk_df$gene     <- g
+      tukey_list[[g]] <<- tk_df
+      TRUE
+    }, error = function(e) { tukey_errs <<- tukey_errs + 1; FALSE })
+  }
+
+  cat(sprintf("  TukeyHSD: %d succeeded, %d failed\n",
+              length(tukey_list), tukey_errs))
+
+  tukey_all <- NULL
+  if (length(tukey_list) > 0) {
+    tukey_all <- do.call(rbind, tukey_list)
+    rownames(tukey_all) <- NULL
+    colnames(tukey_all) <- c("diff", "lwr", "upr", "p_tukey", "contrast", "gene")
+    tukey_all$padj_tukey <- p.adjust(tukey_all$p_tukey, method = "BH")
+
+    write.csv(tukey_all,
+              file.path("isolate_pairwise_results",
+                        paste0(out_prefix, "_TukeyHSD_pairwise.csv")),
+              row.names = FALSE)
+    cat(sprintf("  Saved %d pairwise comparisons\n", nrow(tukey_all)))
+  }
+
+  # ── 3. CLD from TukeyHSD ──────────────────────────────────────────────
+  cat("  Building CLD from TukeyHSD results...\n")
+
+  cld_list <- list()
+  if (length(tukey_list) > 0) {
+    for (g in names(tukey_list)) {
+      tk_g <- tukey_list[[g]]
+      cld_vec <- tryCatch(
+        build_cld_from_tukey(tk_g, isolates),
+        error = function(e) NULL
+      )
+      if (!is.null(cld_vec)) {
+        cld_list[[g]] <- data.frame(
+          gene    = g,
+          isolate = names(cld_vec),
+          group   = as.character(cld_vec),
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+
+  cld_all <- NULL
+  if (length(cld_list) > 0) {
+    cld_all <- do.call(rbind, cld_list)
+    rownames(cld_all) <- NULL
+    write.csv(cld_all,
+              file.path("isolate_pairwise_results",
+                        paste0(out_prefix, "_CLD_from_Tukey.csv")),
+              row.names = FALSE)
+    cat(sprintf("  CLD built for %d genes\n", length(cld_list)))
+  }
+
+  # ── 4. CLD Concordance with hypothesis ────────────────────────────────
+  concordance <- NULL
+  if (length(cld_list) > 0) {
+    cat("\n  -- Concordance with hypothesis --\n")
+
+    concordance <- do.call(rbind, lapply(names(cld_list), function(g) {
+      cg <- cld_list[[g]]
+      data.frame(
+        gene             = g,
+        low_same         = check_share_letter(cg, "WISS47", "JS659"),
+        high_same        = check_share_letter(cg, "MNSS6", "Xtra7"),
+        low_vs_high_diff = !check_share_letter(cg, "WISS47", "MNSS6"),
+        ssp_vs_bn_diff   = !check_share_letter(cg, "SSPotter", "BN172"),
+        stringsAsFactors = FALSE
+      )
+    }))
+
+    nt <- sum(!is.na(concordance$low_same))
+    if (nt > 0) {
+      cat(sprintf("    WISS47 ~ JS659  (Low same group):      %.1f%% (%d/%d)\n",
+                  100 * mean(concordance$low_same, na.rm = TRUE),
+                  sum(concordance$low_same, na.rm = TRUE), nt))
+      cat(sprintf("    MNSS6  ~ Xtra7  (High same group):     %.1f%% (%d/%d)\n",
+                  100 * mean(concordance$high_same, na.rm = TRUE),
+                  sum(concordance$high_same, na.rm = TRUE), nt))
+      cat(sprintf("    Low != High     (separated):           %.1f%% (%d/%d)\n",
+                  100 * mean(concordance$low_vs_high_diff, na.rm = TRUE),
+                  sum(concordance$low_vs_high_diff, na.rm = TRUE), nt))
+      cat(sprintf("    SSPotter != BN172 (specialists diff):  %.1f%% (%d/%d)\n",
+                  100 * mean(concordance$ssp_vs_bn_diff, na.rm = TRUE),
+                  sum(concordance$ssp_vs_bn_diff, na.rm = TRUE), nt))
+    }
+
+    write.csv(concordance,
+              file.path("isolate_pairwise_results",
+                        paste0(out_prefix, "_CLD_concordance.csv")),
+              row.names = FALSE)
+  }
+
+  # ── 5. Pairwise significance summary ──────────────────────────────────
+  pair_summary <- NULL
+  if (!is.null(tukey_all) && nrow(tukey_all) > 0) {
+    cat("\n  -- Pairwise significance summary (Tukey padj < 0.05) --\n")
+
+    pair_summary <- tukey_all %>%
+      group_by(contrast) %>%
+      summarise(
+        n_tested  = n(),
+        n_sig     = sum(padj_tukey < 0.05, na.rm = TRUE),
+        pct_sig   = round(100 * n_sig / n_tested, 1),
+        mean_diff = round(mean(abs(diff)), 3),
+        .groups   = "drop"
+      ) %>%
+      arrange(desc(pct_sig))
+
+    print(as.data.frame(pair_summary))
+
+    write.csv(pair_summary,
+              file.path("isolate_pairwise_results",
+                        paste0(out_prefix, "_pairwise_summary.csv")),
+              row.names = FALSE)
+  }
+
+  # ── 6. Planned contrasts (direct, no emmeans) ─────────────────────────
+  cat("\n  -- Planned contrasts (direct) --\n")
+
+  contrast_defs <- list(
+    "High_vs_Low" = c(WISS47 = -0.5, JS659 = -0.5,
+                      MNSS6 = 0.5, Xtra7 = 0.5,
+                      BN172 = 0, SSPotter = 0),
+    "SSPotter_vs_BN172" = c(WISS47 = 0, JS659 = 0, MNSS6 = 0, Xtra7 = 0,
+                            BN172 = -1, SSPotter = 1),
+    "Specialists_vs_Generalists" = c(WISS47 = -0.25, JS659 = -0.25,
+                                      MNSS6 = -0.25, Xtra7 = -0.25,
+                                      BN172 = 0.5, SSPotter = 0.5)
+  )
+
+  contrast_results <- list()
+  for (g in sig_genes) {
+    df <- data.frame(expr = expr_mat[g, ], meta)
+    fit <- tryCatch(
+      lm(as.formula(paste("expr ~", fml_str)), data = df),
+      error = function(e) NULL
+    )
+    if (is.null(fit)) next
+
+    iso_means <- tapply(df$expr, df$isolate, mean)
+    mse <- sum(fit$residuals^2) / fit$df.residual
+    ns  <- table(df$isolate)
+
+    for (cname in names(contrast_defs)) {
+      cvec   <- contrast_defs[[cname]]
+      iso_in <- intersect(names(cvec), names(iso_means))
+      if (length(iso_in) < length(cvec)) next
+
+      estimate <- sum(cvec[iso_in] * iso_means[iso_in])
+      se_est   <- sqrt(mse * sum(cvec[iso_in]^2 / ns[iso_in]))
+      t_val    <- estimate / se_est
+      p_val    <- 2 * pt(abs(t_val), df = fit$df.residual, lower.tail = FALSE)
+
+      contrast_results[[length(contrast_results) + 1]] <- data.frame(
+        gene = g, contrast = cname,
+        estimate = estimate, SE = se_est,
+        t_value = t_val, p_value = p_val,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+
+  planned_all <- NULL
+  if (length(contrast_results) > 0) {
+    planned_all <- do.call(rbind, contrast_results)
+    planned_all$padj <- p.adjust(planned_all$p_value, method = "BH")
+
+    for (ct in unique(planned_all$contrast)) {
+      sub <- planned_all[planned_all$contrast == ct, ]
+      cat(sprintf("    %-35s %d / %d sig (padj<0.05)\n",
+                  ct, sum(sub$padj < 0.05, na.rm = TRUE), nrow(sub)))
+    }
+
+    write.csv(planned_all,
+              file.path("isolate_pairwise_results",
+                        paste0(out_prefix, "_planned_contrasts.csv")),
+              row.names = FALSE)
+  }
+
+  # ── 7. Bootstrap clustering confidence ────────────────────────────────
+  cat("\n  -- Bootstrap clustering confidence (1000 resamples) --\n")
+
+  sig_scaled <- t(scale(t(expr_mat[sig_genes, ])))
+  n_boot     <- 1000
+  n_sig_g    <- length(sig_genes)
+
+  pair_count <- matrix(0, length(isolates), length(isolates),
+                       dimnames = list(isolates, isolates))
+
+  set.seed(42)
+  for (b in seq_len(n_boot)) {
+    boot_genes <- sample(sig_genes, n_sig_g, replace = TRUE)
+    boot_mat   <- sig_scaled[boot_genes, ]
+    boot_means <- sapply(isolates, function(iso) {
+      cols <- which(meta$isolate == iso)
+      rowMeans(boot_mat[, cols, drop = FALSE])
+    })
+    boot_dist <- dist(t(boot_means))
+    boot_hc   <- hclust(boot_dist, method = "ward.D2")
+    boot_cut  <- cutree(boot_hc, k = 4)
+
+    for (i in seq_along(isolates)) {
+      for (j in seq_along(isolates)) {
+        if (boot_cut[i] == boot_cut[j]) {
+          pair_count[i, j] <- pair_count[i, j] + 1
+        }
+      }
+    }
+  }
+
+  co_cluster_pct <- round(100 * pair_count / n_boot, 1)
+
+  cat("  Co-clustering frequency (%, k=4):\n")
+  print(co_cluster_pct)
+
+  write.csv(co_cluster_pct,
+            file.path("isolate_pairwise_results",
+                      paste0(out_prefix, "_bootstrap_cocluster.csv")))
+
+  # Return all results
+  return(invisible(list(
+    pergene     = pergene,
+    tukey_all   = tukey_all,
+    cld_all     = cld_all,
+    concordance = concordance,
+    pair_summary = pair_summary,
+    planned     = planned_all,
+    co_cluster  = co_cluster_pct,
+    sig_genes   = sig_genes,
+    sig_scaled  = sig_scaled,
+    isolates    = isolates,
+    meta        = meta,
+    expr_mat    = expr_mat,
+    use_block   = use_block,
+    fml_str     = fml_str
+  )))
+}
+```
+
+## Visualisation Functions
+
+```{r define-viz-functions}
+# ── Pairwise % sig heatmap ──
+plot_pairwise_heatmap <- function(res, label) {
+  if (is.null(res$pair_summary)) return(invisible(NULL))
+  isolates <- res$isolates
+  pair_mat <- matrix(0, length(isolates), length(isolates),
+                     dimnames = list(isolates, isolates))
+  for (r in seq_len(nrow(res$pair_summary))) {
+    pair <- strsplit(as.character(res$pair_summary$contrast[r]), "-")[[1]]
+    if (all(pair %in% isolates)) {
+      pair_mat[pair[1], pair[2]] <- res$pair_summary$pct_sig[r]
+      pair_mat[pair[2], pair[1]] <- res$pair_summary$pct_sig[r]
+    }
+  }
+  pheatmap(pair_mat,
+           display_numbers = TRUE, number_format = "%.1f%%",
+           cluster_rows = TRUE, cluster_cols = TRUE,
+           color = colorRampPalette(c("white", "orange", "red"))(50),
+           main = paste0(label, "\n% genes with sig Tukey isolate diff"),
+           fontsize = 12, fontsize_number = 10)
+}
+
+# ── Bootstrap co-clustering heatmap ──
+plot_bootstrap_heatmap <- function(res, label) {
+  if (is.null(res$co_cluster)) return(invisible(NULL))
+  pheatmap(res$co_cluster,
+           display_numbers = TRUE, number_format = "%.0f%%",
+           cluster_rows = TRUE, cluster_cols = TRUE,
+           color = colorRampPalette(c("white", "#2166AC"))(50),
+           main = paste0(label, "\nBootstrap co-clustering % (k=4, n=1000)"),
+           fontsize = 12, fontsize_number = 11)
+}
+
+# ── Isolate dendrogram ──
+plot_isolate_dendrogram <- function(res, label) {
+  if (is.null(res$sig_scaled)) return(invisible(NULL))
+  iso_means <- sapply(res$isolates, function(iso) {
+    cols <- which(res$meta$isolate == iso)
+    rowMeans(res$sig_scaled[, cols, drop = FALSE])
+  })
+  iso_dist <- dist(t(iso_means), method = "euclidean")
+  iso_hc   <- hclust(iso_dist, method = "ward.D2")
+  plot(iso_hc, main = paste0(label, "\nIsolate clustering (Ward.D2, sig genes)"),
+       xlab = "", sub = "", cex = 1.2, lwd = 2)
+  # rect.hclust(iso_hc, k = 4,
+  #             border = c("#1f77b4", "#d62728", "#8c564b", "#e682fa"))
+}
+
+# ── Isolate × Timepoint mean heatmap ──
+plot_isotp_heatmap <- function(res, label, n_top = 200) {
+  if (is.null(res$sig_scaled)) return(invisible(NULL))
+
+  meta <- res$meta
+  meta$iso_tp <- paste0(meta$isolate, "_", meta$timepoint)
+  iso_tp_levels <- sort(unique(meta$iso_tp))
+
+  iso_tp_means <- sapply(iso_tp_levels, function(it) {
+    cols <- which(meta$iso_tp == it)
+    if (length(cols) > 1) rowMeans(res$sig_scaled[, cols, drop = FALSE])
+    else res$sig_scaled[, cols]
+  })
+
+  ann_df <- data.frame(
+    Isolate   = sub("_.*", "", iso_tp_levels),
+    Timepoint = sub(".*_", "", iso_tp_levels),
+    row.names = iso_tp_levels
+  )
+  ann_df$Aggr_group <- dplyr::case_when(
+    ann_df$Isolate %in% c("WISS47", "JS659")  ~ "Low",
+    ann_df$Isolate %in% c("MNSS6", "Xtra7")   ~ "High",
+    ann_df$Isolate == "SSPotter"               ~ "Soy-specific",
+    ann_df$Isolate == "BN172"                  ~ "Sun-specific"
+  )
+
+  ann_colors_local <- list(
+    Isolate    = isolate_colors[intersect(names(isolate_colors), unique(ann_df$Isolate))],
+    Timepoint  = tp_colors[intersect(names(tp_colors), unique(ann_df$Timepoint))],
+    Aggr_group = aggr_colors[intersect(names(aggr_colors), unique(ann_df$Aggr_group))]
+  )
+
+  top_genes <- head(res$sig_genes[order(
+    res$pergene$padj_isolate[match(res$sig_genes, res$pergene$gene)])], n_top)
+  plot_mat <- iso_tp_means[top_genes, ]
+
+  pheatmap(plot_mat,
+           annotation_col = ann_df,
+           annotation_colors = ann_colors_local,
+           show_rownames = FALSE,
+           cluster_rows = TRUE, cluster_cols = TRUE,
+           color = colorRampPalette(c("blue", "white", "red"))(100),
+           breaks = seq(-2, 2, length.out = 101),
+           main = paste0(label, " - Isolate x Timepoint means (top ",
+                         min(n_top, length(top_genes)), " sig genes)"),
+           fontsize_col = 9, fontsize_row = 4)
+}
+
+# ── Planned contrast volcano ──
+plot_planned_volcano <- function(planned_df, contrast_name, title_str) {
+  if (is.null(planned_df) || nrow(planned_df) == 0)
+    return(ggplot() + labs(title = paste(title_str, "no data")) + theme_void())
+  sub <- planned_df[planned_df$contrast == contrast_name, ]
+  if (nrow(sub) == 0) return(ggplot() + theme_void())
+  sub$sig <- ifelse(sub$padj < 0.05, "Sig", "NS")
+  ggplot(sub, aes(x = estimate, y = -log10(padj), color = sig)) +
+    geom_point(alpha = 0.6, size = 2) +
+    scale_color_manual(values = c(Sig = "red", NS = "grey60")) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+    labs(title = paste(title_str, contrast_name),
+         x = "Estimate", y = "-log10(padj)") +
+    theme_bw(base_size = 13) + theme(legend.position = "none")
+}
+```
+
+
+# A. Pathogen Genes on Soybean
+
+```{r anova-A}
+res_A <- run_pairwise_analysis(vst_soy_pathogen,
+                                "A. Pathogen on Soybean",
+                                "pathogen_soybean")
+```
+
+```{r viz-A-pairwise-heatmap, fig.height=6, fig.width=7}
+plot_pairwise_heatmap(res_A, "Pathogen on Soybean")
+```
+
+```{r viz-A-dendrogram, fig.height=5, fig.width=8}
+plot_isolate_dendrogram(res_A, "Pathogen on Soybean")
+```
+
+```{r viz-A-bootstrap, fig.height=6, fig.width=7}
+plot_bootstrap_heatmap(res_A, "Pathogen on Soybean")
+```
+
+```{r viz-A-isotp-heatmap, fig.height=10, fig.width=12}
+plot_isotp_heatmap(res_A, "Pathogen on Soybean")
+```
+
+```{r viz-A-contrasts, fig.height=5, fig.width=14}
+if (!is.null(res_A$planned)) {
+  library(gridExtra)
+  grid.arrange(
+    plot_planned_volcano(res_A$planned, "High_vs_Low", "Path-Soy"),
+    plot_planned_volcano(res_A$planned, "SSPotter_vs_BN172", "Path-Soy"),
+    plot_planned_volcano(res_A$planned, "Specialists_vs_Generalists", "Path-Soy"),
+    nrow = 1)
+}
+```
+
+
+# B. Pathogen Genes on Sunflower
+
+```{r anova-B}
+res_B <- run_pairwise_analysis(vst_sun_pathogen,
+                                "B. Pathogen on Sunflower",
+                                "pathogen_sunflower")
+```
+
+```{r viz-B-pairwise-heatmap, fig.height=6, fig.width=7}
+plot_pairwise_heatmap(res_B, "Pathogen on Sunflower")
+```
+
+```{r viz-B-dendrogram, fig.height=5, fig.width=8}
+plot_isolate_dendrogram(res_B, "Pathogen on Sunflower")
+```
+
+```{r viz-B-bootstrap, fig.height=6, fig.width=7}
+plot_bootstrap_heatmap(res_B, "Pathogen on Sunflower")
+```
+
+```{r viz-B-isotp-heatmap, fig.height=10, fig.width=12}
+plot_isotp_heatmap(res_B, "Pathogen on Sunflower")
+```
+
+```{r viz-B-contrasts, fig.height=5, fig.width=14}
+if (!is.null(res_B$planned)) {
+  library(gridExtra)
+  grid.arrange(
+    plot_planned_volcano(res_B$planned, "High_vs_Low", "Path-Sun"),
+    plot_planned_volcano(res_B$planned, "SSPotter_vs_BN172", "Path-Sun"),
+    plot_planned_volcano(res_B$planned, "Specialists_vs_Generalists", "Path-Sun"),
+    nrow = 1)
+}
+```
+
+
+# C. Soybean Host Genes
+
+```{r anova-C}
+res_C <- run_pairwise_analysis(vst_soy_host,
+                                "C. Soybean Host Genes",
+                                "host_soybean")
+```
+
+```{r viz-C-pairwise-heatmap, fig.height=6, fig.width=7}
+plot_pairwise_heatmap(res_C, "Soybean Host")
+```
+
+```{r viz-C-dendrogram, fig.height=5, fig.width=8}
+plot_isolate_dendrogram(res_C, "Soybean Host")
+```
+
+```{r viz-C-bootstrap, fig.height=6, fig.width=7}
+plot_bootstrap_heatmap(res_C, "Soybean Host")
+```
+
+```{r viz-C-isotp-heatmap, fig.height=10, fig.width=12}
+plot_isotp_heatmap(res_C, "Soybean Host")
+```
+
+```{r viz-C-contrasts, fig.height=5, fig.width=14}
+if (!is.null(res_C$planned)) {
+  library(gridExtra)
+  grid.arrange(
+    plot_planned_volcano(res_C$planned, "High_vs_Low", "Host-Soy"),
+    plot_planned_volcano(res_C$planned, "SSPotter_vs_BN172", "Host-Soy"),
+    plot_planned_volcano(res_C$planned, "Specialists_vs_Generalists", "Host-Soy"),
+    nrow = 1)
+}
+```
+
+
+# D. Sunflower Host Genes
+
+```{r anova-D}
+res_D <- run_pairwise_analysis(vst_sun_host,
+                                "D. Sunflower Host Genes",
+                                "host_sunflower")
+```
+
+```{r viz-D-pairwise-heatmap, fig.height=6, fig.width=7}
+plot_pairwise_heatmap(res_D, "Sunflower Host")
+```
+
+```{r viz-D-dendrogram, fig.height=5, fig.width=8}
+plot_isolate_dendrogram(res_D, "Sunflower Host")
+```
+
+```{r viz-D-bootstrap, fig.height=6, fig.width=7}
+plot_bootstrap_heatmap(res_D, "Sunflower Host")
+```
+
+```{r viz-D-isotp-heatmap, fig.height=10, fig.width=12}
+plot_isotp_heatmap(res_D, "Sunflower Host")
+```
+
+```{r viz-D-contrasts, fig.height=5, fig.width=14}
+if (!is.null(res_D$planned)) {
+  library(gridExtra)
+  grid.arrange(
+    plot_planned_volcano(res_D$planned, "High_vs_Low", "Host-Sun"),
+    plot_planned_volcano(res_D$planned, "SSPotter_vs_BN172", "Host-Sun"),
+    plot_planned_volcano(res_D$planned, "Specialists_vs_Generalists", "Host-Sun"),
+    nrow = 1)
+}
+```
+
+
+# Grand Summary
+
+```{r grand-summary, fig.width=14, fig.height=6}
+cat(paste(rep("=", 80), collapse = ""), "\n")
+cat("AGGRESSIVENESS GROUPING CONFIRMATION SUMMARY\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+cat("Hypothesis:\n")
+cat("  Low:             WISS47, JS659\n")
+cat("  High:            MNSS6, Xtra7\n")
+cat("  Soy-specific:    SSPotter\n")
+cat("  Sun-specific:    BN172\n\n")
+
+datasets <- list("A_Pathogen_Soybean"   = res_A,
+                 "B_Pathogen_Sunflower" = res_B,
+                 "C_Host_Soybean"       = res_C,
+                 "D_Host_Sunflower"     = res_D)
+
+summary_rows <- list()
+
+for (nm in names(datasets)) {
+  res <- datasets[[nm]]
+  if (is.null(res) || is.null(res$pergene)) {
+    cat(sprintf("-- %s: SKIPPED --\n\n", nm)); next
+  }
+
+  n_iso <- sum(res$pergene$padj_isolate < 0.05, na.rm = TRUE)
+  cat(sprintf("-- %s --\n", nm))
+  cat(sprintf("  Isolate DEGs: %d / %d\n", n_iso, nrow(res$pergene)))
+
+  # CLD concordance
+  conc <- res$concordance
+  if (!is.null(conc) && nrow(conc) > 0) {
+    pl <- 100 * mean(conc$low_same, na.rm = TRUE)
+    ph <- 100 * mean(conc$high_same, na.rm = TRUE)
+    pd <- 100 * mean(conc$low_vs_high_diff, na.rm = TRUE)
+    ps <- 100 * mean(conc$ssp_vs_bn_diff, na.rm = TRUE)
+    cat(sprintf("  CLD: Low-same=%.1f%%, High-same=%.1f%%, Low!=High=%.1f%%, SSP!=BN=%.1f%%\n",
+                pl, ph, pd, ps))
+  }
+
+  # Bootstrap
+  cc <- res$co_cluster
+  if (!is.null(cc)) {
+    cat(sprintf("  Bootstrap: WISS47-JS659=%.0f%%, MNSS6-Xtra7=%.0f%%, WISS47-MNSS6=%.0f%%, SSP-BN=%.0f%%\n",
+                cc["WISS47", "JS659"], cc["MNSS6", "Xtra7"],
+                cc["WISS47", "MNSS6"], cc["SSPotter", "BN172"]))
+  }
+
+  # Planned contrasts
+  if (!is.null(res$planned)) {
+    cat("  Planned contrasts (padj<0.05):\n")
+    for (ct in unique(res$planned$contrast)) {
+      sub <- res$planned[res$planned$contrast == ct, ]
+      cat(sprintf("    %-35s %d / %d\n", ct, sum(sub$padj < 0.05, na.rm = TRUE), nrow(sub)))
+    }
+  }
+  cat("\n")
+}
+```
+
+# Output File Index
+
+```{r file-index}
+cat("All files in isolate_pairwise_results/:\n\n")
+cat("Per dataset (x4):\n")
+cat("  *_pergene_ANOVA.csv         - per-gene F & p for isolate, timepoint, block\n")
+cat("  *_TukeyHSD_pairwise.csv     - all pairwise Tukey comparisons\n")
+cat("  *_CLD_from_Tukey.csv        - compact letter display (built from Tukey)\n")
+cat("  *_CLD_concordance.csv       - hypothesis match check per gene\n")
+cat("  *_pairwise_summary.csv      - % sig per isolate pair\n")
+cat("  *_planned_contrasts.csv     - High vs Low, SSPotter vs BN172, Spec vs Gen\n")
+cat("  *_bootstrap_cocluster.csv   - bootstrap co-clustering frequency matrix\n")
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```

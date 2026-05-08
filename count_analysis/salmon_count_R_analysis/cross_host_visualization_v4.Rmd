@@ -1,0 +1,1409 @@
+---
+title: "Cross-Host Visualization: Venn Diagrams, UpSet Plot & Tanglegram"
+subtitle: "Sclerotinia Pathogen DEGs — Sunflower (Ha) vs Soybean (Gm)"
+author: "Analysis by wan00965"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 8, dpi = 300)
+```
+
+# 1. Setup
+
+## Install Required Packages (Run Once)
+
+```{r install-packages, eval=FALSE}
+install.packages(c("VennDiagram", "UpSetR", "dendextend", "ggplot2",
+                    "dplyr", "RColorBrewer", "gridExtra", "eulerr", "pheatmap"))
+```
+
+## Load Libraries
+
+```{r load-libraries}
+library(DESeq2)
+library(VennDiagram)
+library(UpSetR)
+library(dendextend)
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
+library(gridExtra)
+library(grid)
+library(eulerr)
+library(pheatmap)
+
+cat("All libraries loaded successfully!\n")
+```
+
+## Set Working Directory
+
+```{r set-wd}
+# UPDATE this path to your data folder
+setwd("/Users/andrew20445/Desktop/To_do_list/RNAseq_data/New_salmon_round3/new_run_count")
+cat("Working directory:", getwd(), "\n")
+```
+
+# 2. Load DEG Data from Both Hosts
+
+```{r load-degs}
+timepoints <- c("24h", "48h", "96h")
+
+# Helper: safely load a DEG file, return NULL if not found
+safe_load_deg <- function(filepath) {
+  if (file.exists(filepath)) {
+    df <- read.csv(filepath, stringsAsFactors = FALSE, row.names = 1)
+    if (nrow(df) > 0) return(df)
+  }
+  return(NULL)
+}
+
+# --- Sunflower (Ha) pathogen DEGs ---
+ha_degs <- list()
+for (tp in timepoints) {
+  f <- sprintf("Ha_pathogen_aggressive_vs_low_DEGs_%s.csv", tp)
+  ha_degs[[tp]] <- safe_load_deg(f)
+  if (!is.null(ha_degs[[tp]])) {
+    cat(sprintf("Ha %s: %d DEGs loaded\n", tp, nrow(ha_degs[[tp]])))
+  } else {
+    cat(sprintf("WARNING: Ha %s not found (%s)\n", tp, f))
+  }
+}
+
+# --- Soybean (Gm) pathogen DEGs ---
+gm_degs <- list()
+for (tp in timepoints) {
+  f <- sprintf("Gm_pathogen_aggressive_vs_low_DEGs_%s.csv", tp)
+  gm_degs[[tp]] <- safe_load_deg(f)
+  if (!is.null(gm_degs[[tp]])) {
+    cat(sprintf("Gm %s: %d DEGs loaded\n", tp, nrow(gm_degs[[tp]])))
+  } else {
+    cat(sprintf("WARNING: Gm %s not found (%s)\n", tp, f))
+  }
+}
+
+# --- Show available CSV files for debugging ---
+cat("\n=== DEG CSV files in working directory ===\n")
+csv_files <- list.files(pattern = "aggressive_vs_low.*\\.csv$", ignore.case = TRUE)
+if (length(csv_files) > 0) {
+  print(csv_files)
+} else {
+  cat("No matching CSV files found! Check filenames.\n")
+  cat("Expected pattern: Ha_pathogen_aggressive_vs_low_DEGs_24h.csv\n")
+  cat("All CSV files:\n")
+  print(list.files(pattern = "\\.csv$"))
+}
+```
+
+## Extract Gene IDs (with safe fallbacks)
+
+```{r extract-gene-ids}
+lfc_col <- "log2FoldChange"
+
+# Safe extraction: returns character(0) if data is NULL or empty
+safe_rownames <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return(character(0))
+  return(rownames(df))
+}
+
+safe_filter_rows <- function(df, direction = "up") {
+  if (is.null(df) || nrow(df) == 0) return(character(0))
+  if (!(lfc_col %in% colnames(df))) return(character(0))
+  if (direction == "up") {
+    return(rownames(df[df[[lfc_col]] > 0, ]))
+  } else {
+    return(rownames(df[df[[lfc_col]] < 0, ]))
+  }
+}
+
+# Build all gene sets with safe fallbacks
+ha_gene_sets <- list(); gm_gene_sets <- list()
+ha_up_sets <- list(); ha_down_sets <- list()
+gm_up_sets <- list(); gm_down_sets <- list()
+
+for (tp in timepoints) {
+  ha_gene_sets[[tp]] <- safe_rownames(ha_degs[[tp]])
+  gm_gene_sets[[tp]] <- safe_rownames(gm_degs[[tp]])
+  ha_up_sets[[tp]]   <- safe_filter_rows(ha_degs[[tp]], "up")
+  ha_down_sets[[tp]] <- safe_filter_rows(ha_degs[[tp]], "down")
+  gm_up_sets[[tp]]   <- safe_filter_rows(gm_degs[[tp]], "up")
+  gm_down_sets[[tp]] <- safe_filter_rows(gm_degs[[tp]], "down")
+}
+
+# Which timepoints actually have data?
+ha_available <- timepoints[sapply(timepoints, function(tp) length(ha_gene_sets[[tp]]) > 0)]
+gm_available <- timepoints[sapply(timepoints, function(tp) length(gm_gene_sets[[tp]]) > 0)]
+
+cat("\n=== DATA AVAILABILITY ===\n")
+cat("Ha timepoints with data:", if (length(ha_available) > 0) paste(ha_available, collapse=", ") else "NONE", "\n")
+cat("Gm timepoints with data:", if (length(gm_available) > 0) paste(gm_available, collapse=", ") else "NONE", "\n")
+
+cat("\n=== GENE SET SIZES ===\n")
+for (tp in timepoints) {
+  cat(sprintf("%s  Ha: %d (Up:%d Down:%d)  |  Gm: %d (Up:%d Down:%d)\n", tp,
+              length(ha_gene_sets[[tp]]), length(ha_up_sets[[tp]]), length(ha_down_sets[[tp]]),
+              length(gm_gene_sets[[tp]]), length(gm_up_sets[[tp]]), length(gm_down_sets[[tp]])))
+}
+```
+
+---
+
+# 3. Venn Diagrams — DEGs Across 3 Timepoints
+
+```{r venn-helper}
+# Helper function to compute all 7 regions of a 3-set Venn
+compute_venn3_stats <- function(set_a, set_b, set_c, names = c("A","B","C")) {
+  all_genes <- unique(c(set_a, set_b, set_c))
+  n_total <- length(all_genes)
+  
+  only_a  <- setdiff(set_a, union(set_b, set_c))
+  only_b  <- setdiff(set_b, union(set_a, set_c))
+  only_c  <- setdiff(set_c, union(set_a, set_b))
+  only_ab <- setdiff(intersect(set_a, set_b), set_c)
+  only_ac <- setdiff(intersect(set_a, set_c), set_b)
+  only_bc <- setdiff(intersect(set_b, set_c), set_a)
+  abc     <- Reduce(intersect, list(set_a, set_b, set_c))
+  
+  counts <- c(length(only_a), length(only_b), length(only_c),
+              length(only_ab), length(only_ac), length(only_bc), length(abc))
+  pcts <- if (n_total > 0) round(100 * counts / n_total, 1) else rep(0, 7)
+  
+  region_names <- c(paste0("Only ",names[1]), paste0("Only ",names[2]), paste0("Only ",names[3]),
+                    paste0(names[1]," & ",names[2]," only"),
+                    paste0(names[1]," & ",names[3]," only"),
+                    paste0(names[2]," & ",names[3]," only"),
+                    "All three")
+  
+  euler_input <- setNames(counts, c(
+    names[1], names[2], names[3],
+    paste0(names[1],"&",names[2]),
+    paste0(names[1],"&",names[3]),
+    paste0(names[2],"&",names[3]),
+    paste0(names[1],"&",names[2],"&",names[3])
+  ))
+  
+  list(counts=counts, pcts=pcts, n_total=n_total,
+       region_names=region_names, euler_input=euler_input)
+}
+```
+
+## 3.1 Sunflower (Ha) Pathogen DEGs — 3-Way Venn
+
+```{r venn-ha-eulerr, fig.width=9, fig.height=8}
+venn_colors <- c("#6495ED", "#FFD700", "#32CD32")
+venn_fills  <- adjustcolor(venn_colors, alpha.f = 0.45)
+
+if (length(ha_available) >= 3) {
+  
+  ha_stats <- compute_venn3_stats(
+    ha_gene_sets[["24h"]], ha_gene_sets[["48h"]], ha_gene_sets[["96h"]],
+    names = c("24 HPI", "48 HPI", "96 HPI"))
+  
+  cat("=== SUNFLOWER (Ha) VENN SUMMARY ===\n")
+  cat(sprintf("Total unique pathogen DEGs: %d\n\n", ha_stats$n_total))
+  for (i in seq_along(ha_stats$counts)) {
+    cat(sprintf("  %s: %d (%.1f%%)\n", ha_stats$region_names[i],
+                ha_stats$counts[i], ha_stats$pcts[i]))
+  }
+  
+  fit_ha <- euler(ha_stats$euler_input)
+  plot(fit_ha,
+       fills = list(fill = venn_fills, alpha = 0.7),
+       edges = list(col = venn_colors, lwd = 2.5),
+       labels = list(cex = 1.3, font = 2, col = venn_colors),
+       quantities = list(cex = 1.2, font = 2, type = c("counts", "percent")),
+       main = list(label = "Pathogen DEGs in Ha89 (Aggressive vs Low Isolates)",
+                   cex = 1.5, font = 2))
+  
+} else if (length(ha_available) == 2) {
+  cat("Only 2 Ha timepoints with data — drawing 2-set Venn\n")
+  tp1 <- ha_available[1]; tp2 <- ha_available[2]
+  fit_ha <- euler(c(
+    setNames(length(setdiff(ha_gene_sets[[tp1]], ha_gene_sets[[tp2]])), tp1),
+    setNames(length(setdiff(ha_gene_sets[[tp2]], ha_gene_sets[[tp1]])), tp2),
+    setNames(length(intersect(ha_gene_sets[[tp1]], ha_gene_sets[[tp2]])),
+             paste0(tp1,"&",tp2))))
+  plot(fit_ha, fills = list(fill = venn_fills[1:2], alpha = 0.7),
+       quantities = list(cex = 1.3, font = 2, type = c("counts","percent")),
+       main = list(label = "Pathogen DEGs in Sunflower (Ha89)", cex = 1.5, font = 2))
+} else {
+  cat("Fewer than 2 Ha timepoints — cannot draw Venn.\n")
+  cat("Available files:\n")
+  print(list.files(pattern = "Ha_pathogen"))
+}
+```
+
+```{r venn-ha-classic, fig.width=8, fig.height=8}
+# Classic VennDiagram package (non-proportional circles, like your Fig. 5)
+if (length(ha_available) >= 3) {
+  
+  futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger")
+  
+  venn.plot.ha <- venn.diagram(
+    x = list("24 HPI" = ha_gene_sets[["24h"]],
+             "48 HPI" = ha_gene_sets[["48h"]],
+             "96 HPI" = ha_gene_sets[["96h"]]),
+    filename = NULL,
+    fill = venn_fills, col = venn_colors, lwd = 2.5,
+    category.names = c("24 HPI","48 HPI","96 HPI"),
+    cat.cex = 1.8, cat.fontface = "bold", cat.col = venn_colors,
+    cat.dist = c(0.06, 0.06, 0.06),
+    cex = 1.6, fontface = "bold", fontfamily = "sans",
+    main = "Pathogen DEGs in Sunflower (Ha89)",
+    main.cex = 2, main.fontface = "bold",
+    euler.d = FALSE, scaled = FALSE, margin = 0.1)
+  
+  grid.newpage()
+  grid.draw(venn.plot.ha)
+}
+```
+
+## 3.2 Soybean (Gm) Pathogen DEGs — 3-Way Venn
+
+```{r venn-gm-eulerr, fig.width=9, fig.height=8}
+if (length(gm_available) >= 3) {
+  
+  gm_stats <- compute_venn3_stats(
+    gm_gene_sets[["24h"]], gm_gene_sets[["48h"]], gm_gene_sets[["96h"]],
+    names = c("24 HPI", "48 HPI", "96 HPI"))
+  
+  cat("=== SOYBEAN (Gm) VENN SUMMARY ===\n")
+  cat(sprintf("Total unique pathogen DEGs: %d\n\n", gm_stats$n_total))
+  for (i in seq_along(gm_stats$counts)) {
+    cat(sprintf("  %s: %d (%.1f%%)\n", gm_stats$region_names[i],
+                gm_stats$counts[i], gm_stats$pcts[i]))
+  }
+  
+  fit_gm <- euler(gm_stats$euler_input)
+  plot(fit_gm,
+       fills = list(fill = venn_fills, alpha = 0.7),
+       edges = list(col = venn_colors, lwd = 2.5),
+       labels = list(cex = 1.3, font = 2, col = venn_colors),
+       quantities = list(cex = 1.2, font = 2, type = c("counts", "percent")),
+       main = list(label = "Pathogen DEGs in Williams 82 (Aggressive vs Low Isolates)",
+                   cex = 1.5, font = 2))
+  
+} else if (length(gm_available) == 2) {
+  cat("Only 2 Gm timepoints with data — drawing 2-set Venn\n")
+  tp1 <- gm_available[1]; tp2 <- gm_available[2]
+  fit_gm <- euler(c(
+    setNames(length(setdiff(gm_gene_sets[[tp1]], gm_gene_sets[[tp2]])), tp1),
+    setNames(length(setdiff(gm_gene_sets[[tp2]], gm_gene_sets[[tp1]])), tp2),
+    setNames(length(intersect(gm_gene_sets[[tp1]], gm_gene_sets[[tp2]])),
+             paste0(tp1,"&",tp2))))
+  plot(fit_gm, fills = list(fill = venn_fills[1:2], alpha = 0.7),
+       quantities = list(cex = 1.3, font = 2, type = c("counts","percent")),
+       main = list(label = "Pathogen DEGs in Soybean (Wm82)", cex = 1.5, font = 2))
+} else {
+  cat("Fewer than 2 Gm timepoints — cannot draw Venn.\n")
+  cat("Available files:\n")
+  print(list.files(pattern = "Gm_pathogen"))
+}
+```
+
+```{r venn-gm-classic, fig.width=8, fig.height=8}
+if (length(gm_available) >= 3) {
+  
+  futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger")
+  
+  venn.plot.gm <- venn.diagram(
+    x = list("24 HPI" = gm_gene_sets[["24h"]],
+             "48 HPI" = gm_gene_sets[["48h"]],
+             "96 HPI" = gm_gene_sets[["96h"]]),
+    filename = NULL,
+    fill = venn_fills, col = venn_colors, lwd = 2.5,
+    category.names = c("24 HPI","48 HPI","96 HPI"),
+    cat.cex = 1.8, cat.fontface = "bold", cat.col = venn_colors,
+    cat.dist = c(0.06, 0.06, 0.06),
+    cex = 1.6, fontface = "bold", fontfamily = "sans",
+    main = "Pathogen DEGs in Soybean (Williams 82)",
+    main.cex = 2, main.fontface = "bold",
+    euler.d = FALSE, scaled = FALSE, margin = 0.1)
+  
+  grid.newpage()
+  grid.draw(venn.plot.gm)
+}
+```
+
+## 3.3 Save Venns as PDF
+
+```{r save-venns, eval=FALSE}
+if (exists("fit_ha")) {
+  pdf("Fig_Venn_Ha_pathogen_DEGs.pdf", width = 8, height = 8)
+  plot(fit_ha, fills = list(fill = venn_fills, alpha = 0.7),
+       edges = list(col = venn_colors, lwd = 2.5),
+       labels = list(cex = 1.2, font = 2),
+       quantities = list(cex = 1.3, font = 2, type = c("counts","percent")),
+       main = list(label = "Pathogen DEGs in Sunflower (Ha89)", cex = 1.5, font = 2))
+  dev.off(); cat("Saved: Fig_Venn_Ha_pathogen_DEGs.pdf\n")
+}
+if (exists("fit_gm")) {
+  pdf("Fig_Venn_Gm_pathogen_DEGs.pdf", width = 8, height = 8)
+  plot(fit_gm, fills = list(fill = venn_fills, alpha = 0.7),
+       edges = list(col = venn_colors, lwd = 2.5),
+       labels = list(cex = 1.2, font = 2),
+       quantities = list(cex = 1.3, font = 2, type = c("counts","percent")),
+       main = list(label = "Pathogen DEGs in Soybean (Wm82)", cex = 1.5, font = 2))
+  dev.off(); cat("Saved: Fig_Venn_Gm_pathogen_DEGs.pdf\n")
+}
+```
+
+---
+
+# 4. UpSet Plot — Cross-Host DEG Overlap
+
+```{r upset-cross-host, fig.width=14, fig.height=8}
+# Build named list of all available sets
+all_sets <- list()
+for (tp in ha_available) all_sets[[paste0("Ha_",tp)]] <- ha_gene_sets[[tp]]
+for (tp in gm_available) all_sets[[paste0("Gm_",tp)]] <- gm_gene_sets[[tp]]
+
+if (length(all_sets) >= 2) {
+  
+  all_genes <- unique(unlist(all_sets))
+  upset_df <- data.frame(row.names = all_genes)
+  for (nm in names(all_sets)) {
+    upset_df[[nm]] <- as.integer(all_genes %in% all_sets[[nm]])
+  }
+  
+  # ---------------------------------------------------------------
+  # NOTE: UpSetR's intersects() query is fragile — it crashes if
+  # the highlighted intersection doesn't appear among the top N
+  # displayed bars. We use a safe approach: color bars by set
+  # membership using the "sets.bar.color" parameter instead,
+  # and skip the problematic queries entirely.
+  # ---------------------------------------------------------------
+  
+  # Color the set size bars: orange for Ha, blue for Gm
+  set_names_ordered <- rev(names(all_sets))
+  bar_colors <- ifelse(grepl("^Ha_", set_names_ordered), "#E69F00", "#56B4E9")
+  
+  upset(upset_df,
+        sets = set_names_ordered,
+        order.by = "freq",
+        nsets = length(all_sets),
+        nintersects = 30,
+        mb.ratio = c(0.6, 0.4),
+        point.size = 3.5,
+        line.size = 1.5,
+        sets.bar.color = bar_colors,
+        mainbar.y.label = "Intersection Size",
+        sets.x.label = "Number of DEGs",
+        text.scale = c(1.5, 1.3, 1.2, 1.2, 1.5, 1.2),
+        set_size.show = TRUE)
+  
+  # Print cross-host overlap stats for the UpSet context
+  cat("\n=== UPSET INTERSECTION SUMMARY ===\n")
+  cat(sprintf("Total unique pathogen DEGs across all conditions: %d\n", length(all_genes)))
+  cat(sprintf("Sets included: %s\n", paste(names(all_sets), collapse = ", ")))
+  
+  # Show top intersections manually
+  # Each gene's membership pattern as a string
+  patterns <- apply(upset_df[, names(all_sets), drop = FALSE], 1,
+                    function(row) paste(names(all_sets)[row == 1], collapse = " + "))
+  pattern_counts <- sort(table(patterns), decreasing = TRUE)
+  cat("\nTop 10 intersection patterns:\n")
+  print(head(pattern_counts, 10))
+  
+} else {
+  cat("Need at least 2 gene sets for UpSet plot.\n")
+}
+```
+
+## 4.2 Cross-Host Venn: Ha vs Gm (All Timepoints Combined)
+
+```{r venn-2host, fig.width=9, fig.height=7}
+ha_all_genes <- unique(unlist(ha_gene_sets))
+gm_all_genes <- unique(unlist(gm_gene_sets))
+
+if (length(ha_all_genes) > 0 && length(gm_all_genes) > 0) {
+  
+  shared_hosts <- intersect(ha_all_genes, gm_all_genes)
+  ha_only <- setdiff(ha_all_genes, gm_all_genes)
+  gm_only <- setdiff(gm_all_genes, ha_all_genes)
+  
+  cat("\n=== CROSS-HOST OVERLAP (All Timepoints Combined) ===\n")
+  cat(sprintf("Ha-only pathogen DEGs: %d\n", length(ha_only)))
+  cat(sprintf("Gm-only pathogen DEGs: %d\n", length(gm_only)))
+  cat(sprintf("Shared between hosts:  %d\n", length(shared_hosts)))
+  
+  venn_2host <- euler(c(
+    "Sunflower\n(Ha89)" = length(ha_only),
+    "Soybean\n(Wm82)"   = length(gm_only),
+    "Sunflower\n(Ha89)&Soybean\n(Wm82)" = length(shared_hosts)))
+  
+  plot(venn_2host,
+       fills = list(fill = c("#FF9933","#6699CC"), alpha = 0.6),
+       edges = list(col = c("#CC6600","#336699"), lwd = 3),
+       labels = list(cex = 1.4, font = 2),
+       quantities = list(cex = 1.5, font = 2, type = c("counts","percent")),
+       main = list(label = "Pathogen DEGs: Sunflower vs Soybean (All Timepoints Combined)",
+                   cex = 1.5, font = 2))
+} else {
+  cat("Need data from both hosts for cross-host comparison.\n")
+}
+```
+
+## 4.3 Per-Timepoint Cross-Host Comparison
+
+```{r venn-per-tp, fig.width=15, fig.height=5}
+both_available <- intersect(ha_available, gm_available)
+
+if (length(both_available) > 0) {
+  
+  tp_summaries <- data.frame()
+  plots_per_tp <- list()
+  
+  for (tp in both_available) {
+    shared_tp <- intersect(ha_gene_sets[[tp]], gm_gene_sets[[tp]])
+    ha_only_tp <- setdiff(ha_gene_sets[[tp]], gm_gene_sets[[tp]])
+    gm_only_tp <- setdiff(gm_gene_sets[[tp]], ha_gene_sets[[tp]])
+    total_union <- length(union(ha_gene_sets[[tp]], gm_gene_sets[[tp]]))
+    
+    tp_summaries <- rbind(tp_summaries, data.frame(
+      Timepoint = tp,
+      Ha_only = length(ha_only_tp), Shared = length(shared_tp),
+      Gm_only = length(gm_only_tp),
+      Ha_total = length(ha_gene_sets[[tp]]), Gm_total = length(gm_gene_sets[[tp]]),
+      Overlap_pct = if(total_union>0) round(100*length(shared_tp)/total_union,1) else 0))
+    
+    fit_tp <- euler(c("Ha"=length(ha_only_tp), "Gm"=length(gm_only_tp),
+                       "Ha&Gm"=length(shared_tp)))
+    plots_per_tp[[tp]] <- plot(fit_tp,
+         fills = list(fill = c("#FF9933","#6699CC"), alpha = 0.6),
+         edges = list(col = c("#CC6600","#336699"), lwd = 2.5),
+         labels = list(cex = 1.1, font = 2),
+         quantities = list(cex = 1.2, font = 2, type = c("counts","percent")),
+         main = list(label = tp, cex = 1.4, font = 2))
+  }
+  
+  cat("\n=== PER-TIMEPOINT CROSS-HOST OVERLAP ===\n")
+  print(tp_summaries)
+  
+  gridExtra::grid.arrange(
+    grobs = plots_per_tp, ncol = length(both_available),
+    top = textGrob("Pathogen DEGs: Sunflower vs Soybean per Timepoint",
+                   gp = gpar(fontsize = 16, fontface = "bold")))
+} else {
+  cat("No shared timepoints between hosts.\n")
+}
+```
+
+---
+
+# 5. Tanglegram — Comparing DEG Profiles Between Hosts
+
+```{r tanglegram, fig.width=14, fig.height=10}
+shared_genes_any <- if (length(ha_all_genes) > 0 && length(gm_all_genes) > 0) {
+  intersect(ha_all_genes, gm_all_genes)
+} else { character(0) }
+
+tps_both <- intersect(ha_available, gm_available)
+
+cat(sprintf("Shared DEGs: %d genes | Shared timepoints: %s\n",
+            length(shared_genes_any), paste(tps_both, collapse=", ")))
+
+if (length(shared_genes_any) >= 20 && length(tps_both) >= 2) {
+  
+  # Build fold-change matrices
+  build_fc_matrix <- function(degs_list, genes, tps) {
+    mat <- matrix(0, nrow=length(genes), ncol=length(tps),
+                  dimnames=list(genes, tps))
+    for (tp in tps) {
+      df <- degs_list[[tp]]
+      if (!is.null(df) && lfc_col %in% colnames(df)) {
+        shared <- intersect(rownames(df), genes)
+        if (length(shared) > 0) mat[shared, tp] <- df[shared, lfc_col]
+      }
+    }
+    return(mat)
+  }
+  
+  fc_ha <- build_fc_matrix(ha_degs, shared_genes_any, tps_both)
+  fc_gm <- build_fc_matrix(gm_degs, shared_genes_any, tps_both)
+  
+  # Select top N genes by max absolute fold change
+  max_fc <- pmax(apply(abs(fc_ha), 1, max, na.rm=TRUE),
+                  apply(abs(fc_gm), 1, max, na.rm=TRUE))
+  
+  n_top <- min(50, length(shared_genes_any))
+  top_genes <- names(sort(max_fc, decreasing=TRUE))[1:n_top]
+  
+  fc_ha_top <- fc_ha[top_genes, , drop=FALSE]
+  fc_gm_top <- fc_gm[top_genes, , drop=FALSE]
+  
+  # Short gene labels
+  short_names <- sapply(top_genes, function(id) {
+    parts <- strsplit(id, "\\|")[[1]]
+    if (length(parts) >= 4) return(parts[4])
+    if (length(parts) >= 3) return(parts[3])
+    return(substr(id, 1, 20))
+  })
+  rownames(fc_ha_top) <- short_names
+  rownames(fc_gm_top) <- short_names
+  
+  # Cluster and color
+  dend_ha <- as.dendrogram(hclust(dist(fc_ha_top), method="ward.D2"))
+  dend_gm <- as.dendrogram(hclust(dist(fc_gm_top), method="ward.D2"))
+  
+  k_cl <- min(4, max(2, n_top %/% 8))
+  cols <- c("#E69F00","#56B4E9","#009E73","#CC79A7")
+  dend_ha <- color_branches(dend_ha, k=k_cl, col=cols[1:k_cl])
+  dend_gm <- color_branches(dend_gm, k=k_cl, col=cols[1:k_cl])
+  
+  dl <- dendlist(dend_ha, dend_gm) %>% untangle(method="step2side")
+  
+  tanglegram(dl,
+             main_left = "Sunflower (Ha89)",
+             main_right = "Soybean (Wm82)",
+             common_subtrees_color_branches = TRUE,
+             highlight_distinct_edges = TRUE,
+             highlight_branches_lwd = FALSE,
+             margin_inner = 8, lwd = 1.8,
+             columns_width = c(5, 3, 5),
+             cex_main = 1.5, cex_main_left = 1.4, cex_main_right = 1.4,
+             lab.cex = 0.7,
+             main = paste0("Top ", n_top, " Shared Pathogen DEGs: Sunflower vs Soybean"))
+  
+  cat(sprintf("\nEntanglement: %.3f (0=identical, 1=max crossing)\n", entanglement(dl)))
+  
+} else {
+  cat("Not enough shared genes or timepoints for tanglegram.\n")
+}
+```
+
+---
+
+# 6. Heatmap — Cross-Host Fold Change Comparison
+
+```{r heatmap, fig.width=12, fig.height=10}
+if (exists("fc_ha") && exists("fc_gm") && length(shared_genes_any) >= 10) {
+
+  # ── Use ALL shared significant genes (no top-N cap) ───────────────────────
+  all_heat <- shared_genes_any
+
+  # Build combined fold-change matrix across both hosts
+  build_fc_matrix_all <- function(degs_list, genes, tps) {
+    mat <- matrix(0, nrow = length(genes), ncol = length(tps),
+                  dimnames = list(genes, tps))
+    for (tp in tps) {
+      df <- degs_list[[tp]]
+      if (!is.null(df) && lfc_col %in% colnames(df)) {
+        shared <- intersect(rownames(df), genes)
+        if (length(shared) > 0) mat[shared, tp] <- df[shared, lfc_col]
+      }
+    }
+    return(mat)
+  }
+
+  fc_ha_heat <- build_fc_matrix_all(ha_degs, all_heat, tps_both)
+  fc_gm_heat <- build_fc_matrix_all(gm_degs, all_heat, tps_both)
+
+  fc_combined <- cbind(fc_ha_heat, fc_gm_heat)
+  colnames(fc_combined) <- c(paste0("Ha_", tps_both), paste0("Gm_", tps_both))
+
+  # Short gene labels
+  rownames(fc_combined) <- sapply(all_heat, function(id) {
+    parts <- strsplit(id, "\\|")[[1]]
+    if (length(parts) >= 4) return(parts[4])
+    if (length(parts) >= 3) return(parts[3])
+    return(substr(id, 1, 20))
+  })
+
+  # Column annotations
+  col_annot <- data.frame(
+    Host      = rep(c("Sunflower", "Soybean"), each = length(tps_both)),
+    Timepoint = rep(tps_both, 2),
+    row.names = colnames(fc_combined))
+
+  annot_colors <- list(
+    Host      = c("Sunflower" = "#FF9933", "Soybean" = "#6699CC"),
+    Timepoint = c("24h" = "#66C2A5", "48h" = "#FC8D62", "96h" = "#8DA0CB")[tps_both])
+
+  max_abs <- max(abs(fc_combined), na.rm = TRUE)
+  if (max_abs == 0) max_abs <- 1
+
+  # Scale figure height dynamically: ~0.18 inches per gene, min 8, max 60
+  n_genes   <- nrow(fc_combined)
+  fig_h     <- max(8, min(60, n_genes * 0.18))
+  font_row  <- ifelse(n_genes <= 60, 7, ifelse(n_genes <= 120, 5, 4))
+
+  cat(sprintf("Plotting heatmap for all %d shared significant genes\n", n_genes))
+
+  pheatmap(fc_combined,
+           color            = colorRampPalette(c("#2166AC", "white", "#B2182B"))(100),
+           breaks           = seq(-max_abs, max_abs, length.out = 101),
+           cluster_cols     = FALSE,
+           clustering_method = "ward.D2",
+           annotation_col   = col_annot,
+           annotation_colors = annot_colors,
+           fontsize_row     = font_row,
+           fontsize_col     = 11,
+           main             = paste0("All ", n_genes,
+                                     " Shared Pathogen DEGs: log2FC (Aggressive vs Low)"),
+           border_color     = NA,
+           cellwidth        = 35,
+           height           = fig_h)
+
+} else {
+  cat("Not enough shared data for heatmap.\n")
+}
+```
+
+---
+
+# 6b. Heatmap — Genes Shared in Both Hosts at ≥2 Timepoints
+
+```{r heatmap-2tp, fig.width=12, fig.height=10}
+if (length(shared_genes_any) >= 5 && length(tps_both) >= 2) {
+
+  # ── Filter: keep only genes that are a DEG in BOTH hosts at ≥2 timepoints ─
+  n_tp_shared <- sapply(shared_genes_any, function(g) {
+    sum(sapply(tps_both,
+               function(tp) g %in% ha_gene_sets[[tp]] && g %in% gm_gene_sets[[tp]]))
+  })
+
+  genes_2tp <- shared_genes_any[n_tp_shared >= 2]
+
+  cat(sprintf("Genes shared in both hosts at >=2 timepoints: %d / %d total shared\n",
+              length(genes_2tp), length(shared_genes_any)))
+
+  if (length(genes_2tp) >= 5) {
+
+    # ── Build FC matrix for filtered genes ──────────────────────────────────
+    build_fc_mat <- function(degs_list, genes, tps) {
+      mat <- matrix(0, nrow = length(genes), ncol = length(tps),
+                    dimnames = list(genes, tps))
+      for (tp in tps) {
+        df <- degs_list[[tp]]
+        if (!is.null(df) && lfc_col %in% colnames(df)) {
+          sh <- intersect(rownames(df), genes)
+          if (length(sh) > 0) mat[sh, tp] <- df[sh, lfc_col]
+        }
+      }
+      return(mat)
+    }
+
+    fc_ha_2tp <- build_fc_mat(ha_degs, genes_2tp, tps_both)
+    fc_gm_2tp <- build_fc_mat(gm_degs, genes_2tp, tps_both)
+
+    fc_comb_2tp <- cbind(fc_ha_2tp, fc_gm_2tp)
+    colnames(fc_comb_2tp) <- c(paste0("Ha_", tps_both), paste0("Gm_", tps_both))
+
+    # Short gene labels
+    rownames(fc_comb_2tp) <- sapply(genes_2tp, function(id) {
+      parts <- strsplit(id, "\\|")[[1]]
+      if (length(parts) >= 4) return(parts[4])
+      if (length(parts) >= 3) return(parts[3])
+      return(substr(id, 1, 20))
+    })
+
+    # Add row annotation: how many timepoints shared
+    row_annot <- data.frame(
+      Shared_TPs = factor(n_tp_shared[genes_2tp]),
+      row.names  = rownames(fc_comb_2tp))
+
+    # Column annotation
+    col_annot_2tp <- data.frame(
+      Host      = rep(c("Sunflower", "Soybean"), each = length(tps_both)),
+      Timepoint = rep(tps_both, 2),
+      row.names = colnames(fc_comb_2tp))
+
+    n_tp_levels <- as.character(sort(unique(n_tp_shared[genes_2tp])))
+    tp_pal <- c("2" = "#FDAE61", "3" = "#D7191C")
+
+    annot_colors_2tp <- list(
+      Host       = c("Sunflower" = "#FF9933", "Soybean" = "#6699CC"),
+      Timepoint  = c("24h" = "#66C2A5", "48h" = "#FC8D62", "96h" = "#8DA0CB")[tps_both],
+      Shared_TPs = tp_pal[n_tp_levels])
+
+    max_abs_2tp <- max(abs(fc_comb_2tp), na.rm = TRUE)
+    if (max_abs_2tp == 0) max_abs_2tp <- 1
+
+    n_g       <- nrow(fc_comb_2tp)
+    fig_h_2tp <- max(6, min(60, n_g * 0.18))
+    font_r    <- ifelse(n_g <= 60, 7, ifelse(n_g <= 120, 5, 4))
+
+    pheatmap(fc_comb_2tp,
+             color             = colorRampPalette(c("#2166AC", "white", "#B2182B"))(100),
+             breaks            = seq(-max_abs_2tp, max_abs_2tp, length.out = 101),
+             cluster_cols      = FALSE,
+             clustering_method = "ward.D2",
+             annotation_col    = col_annot_2tp,
+             annotation_row    = row_annot,
+             annotation_colors = annot_colors_2tp,
+             fontsize_row      = font_r,
+             fontsize_col      = 11,
+             main              = paste0(n_g,
+               " Shared Pathogen DEGs (Both Hosts, ≥2 Timepoints): log2FC (Aggressive vs Low)"),
+             border_color      = NA,
+             cellwidth         = 35,
+             height            = fig_h_2tp)
+
+  } else {
+    cat("Fewer than 5 genes pass the >=2 shared timepoints filter — skipping heatmap.\n")
+  }
+
+} else {
+  cat("Not enough shared data for this heatmap.\n")
+}
+```
+
+# 6c. Export Genes Shared at ≥2 Timepoints to CSV
+
+```{r export-shared-2tp}
+if (exists("genes_2tp") && length(genes_2tp) >= 1) {
+
+  # ── Build full FC and padj matrices for the filtered genes ────────────────
+  build_fc_export <- function(degs_list, genes, tps) {
+    mat <- matrix(NA_real_, nrow = length(genes), ncol = length(tps),
+                  dimnames = list(genes, tps))
+    for (tp in tps) {
+      df <- degs_list[[tp]]
+      if (!is.null(df) && lfc_col %in% colnames(df)) {
+        sh <- intersect(rownames(df), genes)
+        if (length(sh) > 0) mat[sh, tp] <- df[sh, lfc_col]
+      }
+    }
+    return(mat)
+  }
+
+  get_padj_export <- function(degs_list, genes, tps, col) {
+    mat <- matrix(NA_real_, nrow = length(genes), ncol = length(tps),
+                  dimnames = list(genes, tps))
+    if (is.null(col)) return(mat)
+    for (tp in tps) {
+      df <- degs_list[[tp]]
+      if (!is.null(df) && col %in% colnames(df)) {
+        sh <- intersect(rownames(df), genes)
+        if (length(sh) > 0) mat[sh, tp] <- df[sh, col]
+      }
+    }
+    return(mat)
+  }
+
+  # Detect padj column
+  padj_col_2tp <- NULL
+  for (tp in timepoints) {
+    df_check <- ha_degs[[tp]]
+    if (!is.null(df_check)) {
+      if ("padj"      %in% colnames(df_check)) { padj_col_2tp <- "padj";      break }
+      if ("FDR"       %in% colnames(df_check)) { padj_col_2tp <- "FDR";       break }
+      if ("adj.P.Val" %in% colnames(df_check)) { padj_col_2tp <- "adj.P.Val"; break }
+    }
+  }
+
+  fc_ha_e  <- build_fc_export(ha_degs, genes_2tp, timepoints)
+  fc_gm_e  <- build_fc_export(gm_degs, genes_2tp, timepoints)
+  padj_ha_e <- get_padj_export(ha_degs, genes_2tp, timepoints, padj_col_2tp)
+  padj_gm_e <- get_padj_export(gm_degs, genes_2tp, timepoints, padj_col_2tp)
+
+  # ── Assemble data frame ───────────────────────────────────────────────────
+  df_2tp <- data.frame(gene_id = genes_2tp, row.names = genes_2tp,
+                       stringsAsFactors = FALSE)
+
+  # Per-timepoint DEG flags
+  for (tp in timepoints) {
+    df_2tp[[paste0("Ha_DEG_", tp)]] <- genes_2tp %in% ha_gene_sets[[tp]]
+    df_2tp[[paste0("Gm_DEG_", tp)]] <- genes_2tp %in% gm_gene_sets[[tp]]
+  }
+
+  # Number of timepoints shared in both hosts simultaneously
+  df_2tp$n_timepoints_shared <- n_tp_shared[genes_2tp]
+
+  # log2FC columns
+  for (tp in timepoints) {
+    df_2tp[[paste0("Ha_log2FC_", tp)]] <- fc_ha_e[genes_2tp, tp]
+    df_2tp[[paste0("Gm_log2FC_", tp)]] <- fc_gm_e[genes_2tp, tp]
+    if (!is.null(padj_col_2tp)) {
+      df_2tp[[paste0("Ha_padj_", tp)]] <- padj_ha_e[genes_2tp, tp]
+      df_2tp[[paste0("Gm_padj_", tp)]] <- padj_gm_e[genes_2tp, tp]
+    }
+  }
+
+  # Max absolute LFC across all conditions
+  lfc_cols_2tp <- grep("_log2FC_", colnames(df_2tp), value = TRUE)
+  df_2tp$max_abs_log2FC <- apply(abs(df_2tp[, lfc_cols_2tp, drop = FALSE]),
+                                  1, max, na.rm = TRUE)
+
+  # Sort: most timepoints shared first, then strongest fold change
+  df_2tp <- df_2tp[order(-df_2tp$n_timepoints_shared, -df_2tp$max_abs_log2FC), ]
+
+  # ── Write CSV ─────────────────────────────────────────────────────────────
+  out_2tp <- "shared_significant_genes_min2tp.csv"
+  write.csv(df_2tp, file = out_2tp, row.names = FALSE)
+
+  cat(sprintf("Exported %d genes (shared in both hosts at >=2 timepoints) to: %s\n",
+              nrow(df_2tp), out_2tp))
+  cat(sprintf("Columns: %s\n\n", paste(colnames(df_2tp), collapse = ", ")))
+
+  preview_cols_2tp <- c("gene_id", "n_timepoints_shared", "max_abs_log2FC",
+                         grep("log2FC", colnames(df_2tp), value = TRUE))
+  cat("Preview (first 6 rows):\n")
+  print(head(df_2tp[, preview_cols_2tp], 6), digits = 3)
+
+} else {
+  cat("No genes passed the >=2 shared timepoints filter — nothing to export.\n")
+}
+```
+
+---
+
+# 6d. Heatmap — ≥2 Shared Timepoints, Row-wise Z-score of VST Expression
+
+```{r heatmap-zscore-vst, fig.width=28, fig.height=14}
+# ── UPDATE these count file names if yours differ ─────────────────────────
+ha_counts_file <- "gene_counts_sunflower_SALMON_PATHOGEN_only.txt"
+gm_counts_file <- "gene_counts_soybean_SALMON_PATHOGEN_only.txt"
+
+# ── Helper: build metadata from sample names ──────────────────────────────
+# Sample name pattern: timepoint_replicate_species_isolate
+# e.g. "24_1_Ha_Xtra7", "48_2_Gm_WISS47"
+build_meta <- function(sample_names) {
+  meta <- data.frame(
+    sample      = sample_names,
+    row.names   = sample_names,
+    stringsAsFactors = FALSE)
+  meta$timepoint_num <- sapply(strsplit(sample_names, "_"), `[`, 1)
+  meta$replicate     <- sapply(strsplit(sample_names, "_"), `[`, 2)
+  meta$isolate       <- sapply(strsplit(sample_names, "_"), function(x) x[length(x)])
+  meta$timepoint     <- sapply(sample_names, function(x) {
+    parts <- strsplit(x, "_")[[1]]
+    if (parts[length(parts)] == "NC") "NC" else paste0(parts[1], "h")
+  })
+  meta$aggressiveness <- sapply(meta$isolate, function(iso) {
+    if (iso == "NC")                          return("Control")
+    if (iso %in% c("WISS47", "JS659"))        return("Low")
+    if (iso %in% c("Xtra7", "MNSS6"))         return("High")
+    if (iso == "SSPotter")                    return("Soy-specific")
+    if (iso == "BN172")                       return("Sun-specific")
+    return("Unknown")
+  })
+  meta$timepoint     <- factor(meta$timepoint,
+                                levels = c("NC","24h","48h","96h"))
+  meta$isolate       <- factor(meta$isolate)
+  meta$aggressiveness <- factor(meta$aggressiveness,
+                                 levels = c("Control","Low","High",
+                                            "Soy-specific","Sun-specific"))
+  return(meta)
+}
+
+# ── Helper: load counts, build DESeq2 object, return VST matrix ───────────
+build_vst <- function(counts_file, label) {
+  if (!file.exists(counts_file)) {
+    cat(sprintf("Count file not found: %s\n", counts_file))
+    return(NULL)
+  }
+  cnt  <- round(read.table(counts_file, header = TRUE, row.names = 1,
+                            check.names = FALSE))
+  meta <- build_meta(colnames(cnt))
+
+  # Keep only infected (non-NC) samples
+  meta_inf <- meta[meta$timepoint != "NC", ]
+  cnt_inf  <- cnt[, rownames(meta_inf)]
+
+  # Filter lowly expressed genes
+  keep <- rowSums(cnt_inf >= 5) >= 3
+  cnt_filt <- cnt_inf[keep, ]
+
+  cat(sprintf("%s: %d pathogen genes (filtered), %d samples\n",
+              label, nrow(cnt_filt), ncol(cnt_filt)))
+
+  dds <- DESeqDataSetFromMatrix(
+    countData = cnt_filt,
+    colData   = meta_inf,
+    design    = ~ isolate + timepoint)
+  dds <- DESeq(dds, quiet = TRUE)
+
+  vst_obj <- vst(dds, blind = FALSE)
+  vst_mat <- assay(vst_obj)
+  attr(vst_mat, "meta") <- meta_inf
+  return(vst_mat)
+}
+
+# ── Build VST matrices ────────────────────────────────────────────────────
+cat("Building VST for Sunflower (Ha) pathogen...\n")
+vst_ha_mat <- build_vst(ha_counts_file, "Ha")
+
+cat("\nBuilding VST for Soybean (Gm) pathogen...\n")
+vst_gm_mat <- build_vst(gm_counts_file, "Gm")
+
+# ── Proceed only if both VST matrices and genes_2tp are available ─────────
+if (!is.null(vst_ha_mat) && !is.null(vst_gm_mat) &&
+    exists("genes_2tp") && length(genes_2tp) >= 5) {
+
+  genes_in_both <- intersect(genes_2tp,
+                              intersect(rownames(vst_ha_mat), rownames(vst_gm_mat)))
+  cat(sprintf("\nGenes (>=2 shared TPs) present in both VST matrices: %d\n",
+              length(genes_in_both)))
+
+  if (length(genes_in_both) >= 5) {
+
+    # ── Combine VST matrices, adding host prefix to sample names ────────────
+    meta_ha <- attr(vst_ha_mat, "meta")
+    meta_gm <- attr(vst_gm_mat, "meta")
+
+    colnames(vst_ha_mat) <- paste0("Ha_", colnames(vst_ha_mat))
+    colnames(vst_gm_mat) <- paste0("Gm_", colnames(vst_gm_mat))
+    rownames(meta_ha)    <- paste0("Ha_", rownames(meta_ha))
+    rownames(meta_gm)    <- paste0("Gm_", rownames(meta_gm))
+
+    vst_comb <- cbind(vst_ha_mat[genes_in_both, ],
+                      vst_gm_mat[genes_in_both, ])
+
+    # ── Row-wise z-score computed SEPARATELY per host to avoid read-depth bias ─
+    # Z-scoring across both hosts combined would inflate/deflate scores based on
+    # whichever host has higher read counts. Instead, each host is z-scored
+    # independently so the mean and SD are host-specific.
+    zscore_host <- function(mat) {
+      t(apply(mat, 1, function(x) {
+        s <- sd(x, na.rm = TRUE)
+        if (is.na(s) || s == 0) return(rep(0, length(x)))
+        (x - mean(x, na.rm = TRUE)) / s
+      }))
+    }
+
+    zscore_ha  <- zscore_host(vst_ha_mat[genes_in_both, ])
+    zscore_gm  <- zscore_host(vst_gm_mat[genes_in_both, ])
+    zscore_mat <- cbind(zscore_ha, zscore_gm)
+    colnames(zscore_mat) <- c(colnames(vst_ha_mat), colnames(vst_gm_mat))
+
+    # Clamp to [-2, +2]
+    zscore_clamped <- pmin(pmax(zscore_mat, -2), 2)
+
+    # ── Column annotations: Host, Aggressiveness, Isolate, Timepoint ────────
+    meta_combined <- rbind(meta_ha, meta_gm)
+    meta_combined$Host <- ifelse(grepl("^Ha_", rownames(meta_combined)),
+                                  "Sunflower", "Soybean")
+
+    col_annot_z <- data.frame(
+      Host          = meta_combined[colnames(zscore_clamped), "Host"],
+      Aggressiveness = as.character(
+                        meta_combined[colnames(zscore_clamped), "aggressiveness"]),
+      Isolate       = as.character(
+                        meta_combined[colnames(zscore_clamped), "isolate"]),
+      Timepoint     = as.character(
+                        meta_combined[colnames(zscore_clamped), "timepoint"]),
+      row.names     = colnames(zscore_clamped),
+      stringsAsFactors = FALSE)
+
+    # ── Row annotation: n timepoints shared ──────────────────────────────
+    row_annot_z <- data.frame(
+      Shared_TPs = factor(n_tp_shared[genes_in_both]),
+      row.names  = genes_in_both)
+
+    # Short gene labels
+    short_ids <- sapply(genes_in_both, function(id) {
+      parts <- strsplit(id, "\\|")[[1]]
+      if (length(parts) >= 4) return(parts[4])
+      if (length(parts) >= 3) return(parts[3])
+      return(substr(id, 1, 20))
+    })
+    rownames(zscore_clamped) <- short_ids
+    rownames(row_annot_z)    <- short_ids
+
+    # ── Annotation colors ─────────────────────────────────────────────────
+    agg_levels <- intersect(c("Control","Low","High","Soy-specific","Sun-specific"),
+                             unique(col_annot_z$Aggressiveness))
+    agg_pal <- c("Control"      = "#AAAAAA",
+                 "Low"          = "#1f77b4",
+                 "High"         = "#d62728",
+                 "Soy-specific" = "#8c564b",
+                 "Sun-specific" = "#e682fa")
+
+    iso_pal <- c("WISS47"   = "#3ACAFF",
+                 "JS659"    = "#00BFB2",
+                 "MNSS6"    = "#FF3173",
+                 "Xtra7"    = "#FF5F3A",
+                 "BN172"    = "#e682fa",
+                 "SSPotter" = "#8c564b")
+    iso_levels  <- sort(unique(col_annot_z$Isolate))
+    iso_colors  <- iso_pal[iso_levels]
+    # Fall back for any unexpected isolate names
+    missing_iso <- iso_levels[is.na(iso_colors)]
+    if (length(missing_iso) > 0) {
+      extra <- setNames(
+        colorRampPalette(RColorBrewer::brewer.pal(8, "Dark2"))(length(missing_iso)),
+        missing_iso)
+      iso_colors[missing_iso] <- extra
+    }
+
+    tp_levels <- intersect(c("24h","48h","96h"), unique(col_annot_z$Timepoint))
+    tp_pal    <- c("24h" = "#FFD700", "48h" = "#FF6347", "96h" = "#8B0000")
+
+    n_tp_lvls <- as.character(sort(unique(n_tp_shared[genes_in_both])))
+    sh_pal    <- c("2" = "#FDAE61", "3" = "#D7191C")
+
+    annot_colors_z <- list(
+      Host           = c("Sunflower" = "#5e3a04", "Soybean" = "#ffcb21"),
+      Aggressiveness = agg_pal[agg_levels],
+      Isolate        = iso_colors,
+      Timepoint      = tp_pal[tp_levels],
+      Shared_TPs     = sh_pal[n_tp_lvls])
+
+    # ── Plot ──────────────────────────────────────────────────────────────
+    n_gz    <- nrow(zscore_clamped)
+    font_rz <- ifelse(n_gz <= 60, 7, ifelse(n_gz <= 120, 5, 4))
+
+    z_colors <- colorRampPalette(c("#2166AC", "white", "#B2182B"))(100)
+    z_breaks <- seq(-2, 2, length.out = 101)
+
+    # NOTE: width/height are intentionally omitted — fig.width/fig.height in
+    # the chunk header control output size in R Markdown. Passing width/height
+    # to pheatmap() only works when using filename= and will crop the plot here.
+    pheatmap(zscore_clamped,
+             color             = z_colors,
+             breaks            = z_breaks,
+             cluster_rows      = TRUE,
+             cluster_cols      = FALSE,
+             clustering_method = "ward.D2",
+             treeheight_row    = 60,
+             treeheight_col    = 0,
+             annotation_col    = col_annot_z,
+             annotation_row    = row_annot_z,
+             annotation_colors = annot_colors_z,
+             fontsize_row      = font_rz,
+             fontsize_col      = 7,
+             angle_col         = 90,
+             main              = paste0(n_gz,
+               " Shared Pathogen DEGs (≥2 Timepoints): Per-Host Row Z-score of VST Expression"),
+             border_color      = NA,
+             cellwidth         = 12,
+             cellheight        = max(6, min(14, 500 / n_gz)),
+             legend            = TRUE,
+             legend_breaks     = c(-2, -1, 0, 1, 2),
+             legend_labels     = c("-2", "-1", "0 (mean)", "1", "2"))
+
+    cat(sprintf("\nHeatmap: %d genes x %d samples\n", n_gz, ncol(zscore_clamped)))
+    cat("Color: blue=-2 (below mean), white=0 (mean), red=+2 (above mean); clamped to ±2\n")
+
+  } else {
+    cat("Too few genes found in both VST matrices after filtering.\n")
+  }
+
+} else if (!exists("genes_2tp") || length(genes_2tp) < 5) {
+  cat("Run sections 2-6b first to generate genes_2tp.\n")
+} else {
+  cat(sprintf("Count file(s) missing. Expected:\n  %s\n  %s\n",
+              ha_counts_file, gm_counts_file))
+}
+```
+
+---
+
+# 6e. Heatmap — ≥2 Shared Timepoints, Z-score VST with Clustered Columns
+
+```{r heatmap-zscore-vst-clustered-cols, fig.width=28, fig.height=14}
+# Reuses vst_ha_mat / vst_gm_mat and zscore_clamped built in chunk 6d.
+# Identical to 6d except cluster_cols = TRUE and treeheight_col = 50.
+
+if (exists("zscore_clamped") && exists("col_annot_z") &&
+    exists("row_annot_z")    && exists("annot_colors_z")) {
+
+  n_gz    <- nrow(zscore_clamped)
+  font_rz <- ifelse(n_gz <= 60, 7, ifelse(n_gz <= 120, 5, 4))
+
+  z_colors <- colorRampPalette(c("#2166AC", "white", "#B2182B"))(100)
+  z_breaks <- seq(-2, 2, length.out = 101)
+
+  pheatmap(zscore_clamped,
+           color             = z_colors,
+           breaks            = z_breaks,
+           cluster_rows      = TRUE,
+           cluster_cols      = TRUE,
+           clustering_method = "ward.D2",
+           treeheight_row    = 60,
+           treeheight_col    = 50,
+           annotation_col    = col_annot_z,
+           annotation_row    = row_annot_z,
+           annotation_colors = annot_colors_z,
+           fontsize_row      = font_rz,
+           fontsize_col      = 7,
+           angle_col         = 90,
+           main              = paste0(n_gz,
+             " Shared Pathogen DEGs (≥2 Timepoints): Per-Host Row Z-score of VST Expression",
+             " — Columns Clustered"),
+           border_color      = NA,
+           cellwidth         = 12,
+           cellheight        = max(6, min(14, 500 / n_gz)),
+           legend            = TRUE,
+           legend_breaks     = c(-2, -1, 0, 1, 2),
+           legend_labels     = c("-2", "-1", "0 (mean)", "1", "2"))
+
+  cat(sprintf("Clustered-column heatmap: %d genes x %d samples\n",
+              n_gz, ncol(zscore_clamped)))
+
+} else {
+  cat("zscore_clamped not found — run chunk heatmap-zscore-vst (section 6d) first.\n")
+}
+```
+
+---
+
+# 6f. Heatmap — Columns Ordered by Host → Aggressiveness → Isolate, Rows Clustered
+
+```{r heatmap-zscore-agg-iso-ordered, fig.width=28, fig.height=14}
+# Reuses zscore_clamped, col_annot_z, row_annot_z, annot_colors_z from 6d.
+# Columns are pre-sorted by Host → Aggressiveness → Isolate → Timepoint.
+# Within each isolate, columns are hierarchically clustered.
+# gaps_col visually separates aggressiveness groups.
+
+if (exists("zscore_clamped") && exists("col_annot_z") &&
+    exists("row_annot_z")    && exists("annot_colors_z")) {
+
+  # ── Define group order ───────────────────────────────────────────────────
+  agg_order <- c("Low", "High", "Soy-specific", "Sun-specific", "Control")
+  tp_order  <- c("24h", "48h", "96h")
+
+  # Sort columns: Host → Aggressiveness → Isolate → Timepoint
+  col_df <- col_annot_z
+  col_df$sample <- rownames(col_df)
+  col_df$Aggressiveness <- factor(col_df$Aggressiveness,
+                                   levels = intersect(agg_order,
+                                                      unique(col_df$Aggressiveness)))
+  col_df$Timepoint <- factor(col_df$Timepoint,
+                              levels = intersect(tp_order, unique(col_df$Timepoint)))
+  col_df$Host <- factor(col_df$Host, levels = c("Sunflower", "Soybean"))
+
+  col_df_sorted <- col_df[order(col_df$Host,
+                                 col_df$Aggressiveness,
+                                 col_df$Isolate,
+                                 col_df$Timepoint), ]
+
+  zscore_ordered <- zscore_clamped[, col_df_sorted$sample, drop = FALSE]
+
+  # ── Compute gaps_col: insert gap between each aggressiveness group ────────
+  # Gap positions are at the cumulative end of each Host x Aggressiveness block
+  group_key <- paste(col_df_sorted$Host, col_df_sorted$Aggressiveness, sep = "_")
+  gap_positions <- which(diff(as.integer(factor(group_key,
+                                                  levels = unique(group_key)))) != 0)
+
+  cat("Column order (Host x Aggressiveness groups):\n")
+  print(table(col_df_sorted$Host, col_df_sorted$Aggressiveness))
+  cat(sprintf("Gap positions after columns: %s\n",
+              paste(gap_positions, collapse = ", ")))
+
+  # ── Plot ──────────────────────────────────────────────────────────────────
+  n_gz    <- nrow(zscore_ordered)
+  font_rz <- ifelse(n_gz <= 60, 7, ifelse(n_gz <= 120, 5, 4))
+
+  z_colors <- colorRampPalette(c("#2166AC", "white", "#B2182B"))(100)
+  z_breaks <- seq(-2, 2, length.out = 101)
+
+  pheatmap(zscore_ordered,
+           color             = z_colors,
+           breaks            = z_breaks,
+           cluster_rows      = TRUE,
+           cluster_cols      = FALSE,
+           clustering_method = "ward.D2",
+           treeheight_row    = 60,
+           treeheight_col    = 0,
+           gaps_col          = gap_positions,
+           annotation_col    = col_annot_z,
+           annotation_row    = row_annot_z,
+           annotation_colors = annot_colors_z,
+           fontsize_row      = font_rz,
+           fontsize_col      = 7,
+           angle_col         = 90,
+           main              = paste0(n_gz,
+             " Shared Pathogen DEGs (≥2 Timepoints): Per-Host Z-score",
+             " — Columns Ordered by Aggressiveness & Isolate"),
+           border_color      = NA,
+           cellwidth         = 12,
+           cellheight        = max(6, min(14, 500 / n_gz)),
+           legend            = TRUE,
+           legend_breaks     = c(-2, -1, 0, 1, 2),
+           legend_labels     = c("-2", "-1", "0 (mean)", "1", "2"))
+
+  cat(sprintf("\nHeatmap: %d genes x %d samples | %d aggressiveness-group gaps\n",
+              n_gz, ncol(zscore_ordered), length(gap_positions)))
+
+} else {
+  cat("zscore_clamped not found — run chunk heatmap-zscore-vst (section 6d) first.\n")
+}
+```
+
+# 7. Export Shared Significant Genes to CSV
+
+```{r export-shared-genes}
+if (length(shared_genes_any) > 0) {
+
+  # ── Build fold-change matrices for ALL shared genes (not just top N) ──────
+  build_fc_matrix_export <- function(degs_list, genes, tps) {
+    mat <- matrix(NA_real_, nrow = length(genes), ncol = length(tps),
+                  dimnames = list(genes, tps))
+    for (tp in tps) {
+      df <- degs_list[[tp]]
+      if (!is.null(df) && lfc_col %in% colnames(df)) {
+        shared <- intersect(rownames(df), genes)
+        if (length(shared) > 0) mat[shared, tp] <- df[shared, lfc_col]
+      }
+    }
+    return(mat)
+  }
+
+  fc_ha_all <- build_fc_matrix_export(ha_degs, shared_genes_any, timepoints)
+  fc_gm_all <- build_fc_matrix_export(gm_degs, shared_genes_any, timepoints)
+
+  # ── Collect padj values ───────────────────────────────────────────────────
+  # Detect padj column name from first available dataset
+  padj_col <- NULL
+  for (tp in timepoints) {
+    df_check <- ha_degs[[tp]]
+    if (!is.null(df_check)) {
+      if ("padj" %in% colnames(df_check))       { padj_col <- "padj";  break }
+      if ("FDR"  %in% colnames(df_check))        { padj_col <- "FDR";   break }
+      if ("adj.P.Val" %in% colnames(df_check))   { padj_col <- "adj.P.Val"; break }
+    }
+  }
+
+  get_padj_mat <- function(degs_list, genes, tps, col) {
+    mat <- matrix(NA_real_, nrow = length(genes), ncol = length(tps),
+                  dimnames = list(genes, tps))
+    if (is.null(col)) return(mat)
+    for (tp in tps) {
+      df <- degs_list[[tp]]
+      if (!is.null(df) && col %in% colnames(df)) {
+        shared <- intersect(rownames(df), genes)
+        if (length(shared) > 0) mat[shared, tp] <- df[shared, col]
+      }
+    }
+    return(mat)
+  }
+
+  padj_ha_all <- get_padj_mat(ha_degs, shared_genes_any, timepoints, padj_col)
+  padj_gm_all <- get_padj_mat(gm_degs, shared_genes_any, timepoints, padj_col)
+
+  # ── Per-timepoint presence flags ─────────────────────────────────────────
+  export_df <- data.frame(
+    gene_id = shared_genes_any,
+    row.names = shared_genes_any,
+    stringsAsFactors = FALSE
+  )
+
+  for (tp in timepoints) {
+    export_df[[paste0("Ha_DEG_", tp)]] <- shared_genes_any %in% ha_gene_sets[[tp]]
+    export_df[[paste0("Gm_DEG_", tp)]] <- shared_genes_any %in% gm_gene_sets[[tp]]
+  }
+
+  # Number of timepoints where gene is shared in BOTH hosts simultaneously
+  tps_both_export <- intersect(ha_available, gm_available)
+  export_df$n_timepoints_shared <- sapply(shared_genes_any, function(g) {
+    sum(sapply(tps_both_export,
+               function(tp) g %in% ha_gene_sets[[tp]] && g %in% gm_gene_sets[[tp]]))
+  })
+
+  # ── log2FC and padj columns ───────────────────────────────────────────────
+  for (tp in timepoints) {
+    export_df[[paste0("Ha_log2FC_", tp)]] <- fc_ha_all[shared_genes_any, tp]
+    export_df[[paste0("Gm_log2FC_", tp)]] <- fc_gm_all[shared_genes_any, tp]
+    if (!is.null(padj_col)) {
+      export_df[[paste0("Ha_padj_", tp)]] <- padj_ha_all[shared_genes_any, tp]
+      export_df[[paste0("Gm_padj_", tp)]] <- padj_gm_all[shared_genes_any, tp]
+    }
+  }
+
+  # Max absolute FC across all conditions (useful for downstream ranking)
+  lfc_cols <- grep("_log2FC_", colnames(export_df), value = TRUE)
+  export_df$max_abs_log2FC <- apply(
+    abs(export_df[, lfc_cols, drop = FALSE]), 1, max, na.rm = TRUE)
+
+  # Sort: most-shared timepoints first, then by strongest fold change
+  export_df <- export_df[order(-export_df$n_timepoints_shared,
+                                -export_df$max_abs_log2FC), ]
+
+  # ── Write CSV ─────────────────────────────────────────────────────────────
+  out_file <- "shared_significant_genes.csv"
+  write.csv(export_df, file = out_file, row.names = FALSE)
+
+  cat(sprintf("Exported %d shared significant genes to: %s\n",
+              nrow(export_df), out_file))
+  cat(sprintf("Columns: %s\n\n", paste(colnames(export_df), collapse = ", ")))
+
+  # Preview
+  preview_cols <- c("gene_id", "n_timepoints_shared", "max_abs_log2FC",
+                    grep("log2FC", colnames(export_df), value = TRUE))
+  cat("Preview (first 6 rows):\n")
+  print(head(export_df[, preview_cols], 6), digits = 3)
+
+} else {
+  cat("No shared significant genes found — nothing to export.\n")
+}
+```
+
+---
+
+# 8. Top 20 Shared Significant Genes — CSV Export
+
+```{r export-top20-genes}
+if (length(shared_genes_any) > 0 && exists("export_df") && nrow(export_df) >= 1) {
+
+  n_top20 <- min(20, nrow(export_df))
+
+  # export_df is already sorted by n_timepoints_shared then max_abs_log2FC
+  top20_df <- head(export_df, n_top20)
+
+  out_file_top20 <- "top20_shared_significant_genes.csv"
+  write.csv(top20_df, file = out_file_top20, row.names = FALSE)
+
+  cat(sprintf("Exported top %d shared significant genes to: %s\n",
+              n_top20, out_file_top20))
+  cat(sprintf("Ranked by: n_timepoints_shared (desc) then max_abs_log2FC (desc)\n\n"))
+
+  preview_cols <- c("gene_id", "n_timepoints_shared", "max_abs_log2FC",
+                    grep("log2FC", colnames(top20_df), value = TRUE))
+  print(top20_df[, preview_cols], digits = 3)
+
+} else {
+  cat("No data available for top 20 export — run the export-shared-genes chunk first.\n")
+}
+```
+
+---
+
+# 9. Summary  
+
+```{r final-summary}
+cat("\n=== CROSS-HOST VISUALIZATION SUMMARY ===\n\n")
+
+cat("-- Sunflower (Ha89) Pathogen DEGs --\n")
+for (tp in timepoints) {
+  n <- length(ha_gene_sets[[tp]])
+  if (n > 0) cat(sprintf("  %s: %d DEGs (Up:%d Down:%d)\n", tp, n,
+                          length(ha_up_sets[[tp]]), length(ha_down_sets[[tp]])))
+  else cat(sprintf("  %s: NO DATA\n", tp))
+}
+
+cat("\n-- Soybean (Wm82) Pathogen DEGs --\n")
+for (tp in timepoints) {
+  n <- length(gm_gene_sets[[tp]])
+  if (n > 0) cat(sprintf("  %s: %d DEGs (Up:%d Down:%d)\n", tp, n,
+                          length(gm_up_sets[[tp]]), length(gm_down_sets[[tp]])))
+  else cat(sprintf("  %s: NO DATA\n", tp))
+}
+
+cat("\n-- Cross-Host --\n")
+if (exists("shared_hosts")) {
+  cat(sprintf("  Shared DEGs (any timepoint): %d\n", length(shared_hosts)))
+  for (tp in intersect(ha_available, gm_available)) {
+    cat(sprintf("  Shared at %s: %d\n", tp,
+                length(intersect(ha_gene_sets[[tp]], gm_gene_sets[[tp]]))))
+  }
+}
+
+cat("\nDone!\n")
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```

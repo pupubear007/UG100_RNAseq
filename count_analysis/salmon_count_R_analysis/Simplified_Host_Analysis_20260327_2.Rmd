@@ -1,0 +1,483 @@
+---
+title: "Simplified Host GO Enrichment Analysis (No Bioconductor Required)"
+author: "RNA-seq Analysis"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  warning = FALSE, 
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 8
+)
+```
+
+# 1. Setup and Library Loading
+
+```{r libraries}
+# Load only the essential libraries that are easily available
+library(clusterProfiler)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(enrichplot)
+
+cat("✓ Essential libraries loaded successfully\n")
+cat("Note: This simplified version works without Bioconductor organism packages\n")
+```
+
+---
+
+# 2. Manual Setup Instructions
+
+**Before running this analysis, you need to:**
+
+1. **Download GO annotation files** for your organisms from:
+   - [Gene Ontology website](http://geneontology.org/docs/download-ontology/)
+   - [UniProt-GOA annotations](https://www.ebi.ac.uk/GOA/downloads)
+   - Organism-specific databases (Phytozome, Ensembl Plants, etc.)
+
+2. **Prepare annotation files** in the format:
+   ```
+   gene_id    go_id       go_name
+   Gene1      GO:0008150  biological_process
+   Gene1      GO:0003674  molecular_function
+   Gene2      GO:0009607  response to biotic stimulus
+   ```
+
+3. **Update file paths** in the script below to match your data location
+
+---
+
+# 3. Configuration
+
+```{r config}
+# ===== UPDATE THESE PATHS =====
+# Set your working directory
+setwd("/Users/andrew20445/Desktop/To_do_list/RNAseq_data/New_salmon_round2")
+
+# Define your organism (change to "Gm" for soybean)
+ORGANISM <- "Ha"  # "Ha" for Helianthus, "Gm" for Glycine max
+
+# Define file patterns for DEG files
+if(ORGANISM == "Ha") {
+  deg_file_pattern <- "./Ha_host_aggressive_vs_low_DEGs_%s.csv"
+  organism_name <- "Helianthus"
+  go_annotation_file <- "./Ha_GO_annotation.txt"  # CREATE THIS FILE
+} else if(ORGANISM == "Gm") {
+  deg_file_pattern <- "./Gm_host_aggressive_vs_low_DEGs_%s.csv"
+  organism_name <- "Glycine max"
+  go_annotation_file <- "./Gm_GO_annotation.txt"  # CREATE THIS FILE
+}
+
+timepoints <- c("24h", "48h", "96h")
+
+cat(sprintf("Analysis configured for: %s\n", organism_name))
+cat(sprintf("GO annotation file: %s\n", go_annotation_file))
+```
+
+---
+
+# 4. Load GO Annotation (Manual)
+
+```{r load_annotation}
+cat("\n=== LOADING GO ANNOTATION ===\n\n")
+
+# Check if annotation file exists
+if(file.exists(go_annotation_file)) {
+  
+  # Try to load custom GO annotation
+  tryCatch({
+    go_annot <- read.delim(go_annotation_file, header = TRUE, stringsAsFactors = FALSE)
+    
+    cat("✓ Loaded GO annotation file\n")
+    cat("  Rows:", nrow(go_annot), "\n")
+    cat("  Columns:", paste(colnames(go_annot), collapse = ", "), "\n")
+    
+    # Show expected format
+    if(nrow(go_annot) > 0) {
+      print(head(go_annot, 3))
+    }
+    
+    annotation_available <- TRUE
+    
+  }, error = function(e) {
+    cat("❌ Error reading annotation file:", e$message, "\n")
+    annotation_available <- FALSE
+  })
+  
+} else {
+  cat("❌ GO annotation file not found:", go_annotation_file, "\n\n")
+  
+  cat("To create this file, you can:\n")
+  cat("1. Download from organism databases (Phytozome, Ensembl)\n")
+  cat("2. Use online tools like g:Profiler or DAVID\n") 
+  cat("3. Extract from GFF3/GTF files with GO annotations\n")
+  cat("4. Use biomaRt to query online databases\n\n")
+  
+  cat("Expected format (tab-separated):\n")
+  cat("gene_id\tgo_id\tgo_name\n")
+  cat("Gene001\tGO:0008150\tbiological_process\n")
+  cat("Gene001\tGO:0009607\tresponse to biotic stimulus\n")
+  cat("Gene002\tGO:0006952\tdefense response\n\n")
+  
+  annotation_available <- FALSE
+}
+```
+
+---
+
+# 5. Alternative: Use Pre-defined GO Categories
+
+```{r predefined_categories}
+if(!annotation_available) {
+  cat("\n=== USING PRE-DEFINED GO CATEGORIES ===\n\n")
+  
+  # Define key plant defense-related GO terms manually
+  # These are the most relevant for host-pathogen interactions
+  
+  defense_go_terms <- data.frame(
+    GO_ID = c(
+      "GO:0006952",  # defense response
+      "GO:0009607",  # response to biotic stimulus
+      "GO:0009626",  # plant-type hypersensitive response
+      "GO:0009627",  # systemic acquired resistance
+      "GO:0009611",  # response to wounding
+      "GO:0071555",  # cell wall organization
+      "GO:0009809",  # lignin biosynthetic process
+      "GO:0052544",  # defense response by callose deposition
+      "GO:0006950",  # response to stress
+      "GO:0042542",  # response to hydrogen peroxide
+      "GO:0009737",  # response to abscisic acid
+      "GO:0009751",  # response to salicylic acid
+      "GO:0009753",  # response to jasmonic acid
+      "GO:0010200",  # response to chitin
+      "GO:0002679",  # respiratory burst involved in defense response
+      "GO:0009595",  # detection of biotic stimulus
+      "GO:0052033",  # pathogen-associated molecular pattern dependent induction
+      "GO:0043900"   # regulation of multi-organism process
+    ),
+    GO_Name = c(
+      "defense response",
+      "response to biotic stimulus", 
+      "plant-type hypersensitive response",
+      "systemic acquired resistance",
+      "response to wounding",
+      "cell wall organization",
+      "lignin biosynthetic process",
+      "defense response by callose deposition in cell wall",
+      "response to stress",
+      "response to hydrogen peroxide",
+      "response to abscisic acid",
+      "response to salicylic acid",
+      "response to jasmonic acid",
+      "response to chitin",
+      "respiratory burst involved in defense response",
+      "detection of biotic stimulus",
+      "pathogen-associated molecular pattern dependent induction by symbiont",
+      "regulation of multi-organism process"
+    ),
+    stringsAsFactors = FALSE
+  )
+  
+  cat("✓ Using pre-defined defense-related GO categories\n")
+  cat("  Number of categories:", nrow(defense_go_terms), "\n")
+  print(defense_go_terms)
+}
+```
+
+---
+
+# 6. Gene List Analysis (Without Enrichment)
+
+```{r gene_analysis, results='asis', fig.width=12, fig.height=8}
+cat("\n=== ANALYZING DEG FILES ===\n\n")
+
+# Function to clean gene IDs based on organism
+clean_gene_id <- function(gene_ids, organism) {
+  if(organism == "Ha") {
+    # Helianthus gene ID cleaning
+    cleaned <- gsub("^[Hh]a_", "", gene_ids)
+    cleaned <- gsub("^HanXRQ_", "", cleaned)
+    cleaned <- gsub("\\.\\d+$", "", cleaned)
+    cleaned <- gsub("_.*$", "", cleaned)
+  } else if(organism == "Gm") {
+    # Glycine max gene ID cleaning  
+    cleaned <- gsub("^[Gg]lyma\\.?", "", gene_ids)
+    cleaned <- gsub("^[Gg]m_", "", cleaned)
+    cleaned <- gsub("\\.\\d+$", "", cleaned)
+    cleaned <- gsub("_.*$", "", cleaned)
+  } else {
+    cleaned <- gene_ids
+  }
+  return(cleaned)
+}
+
+# Store results for each timepoint
+all_results <- list()
+
+for (tp in timepoints) {
+  
+  cat("\n\n---\n\n")
+  cat(sprintf("## %s Analysis for %s {.tabset}\n\n", tp, organism_name))
+  
+  cat(sprintf("\n=== PROCESSING TIMEPOINT: %s ===\n\n", tp))
+  
+  # Load DEG file
+  deg_file <- sprintf(deg_file_pattern, tp)
+  
+  if(!file.exists(deg_file)) {
+    cat(sprintf("❌ DEG file not found: %s — SKIPPING\n", deg_file))
+    next
+  }
+  
+  host_degs <- read.csv(deg_file, stringsAsFactors = FALSE, row.names = 1)
+  cat(sprintf("✓ Loaded %d DEGs from %s\n", nrow(host_degs), basename(deg_file)))
+  
+  # Process gene IDs
+  original_gene_ids <- rownames(host_degs)
+  host_degs$clean_gene_id <- clean_gene_id(original_gene_ids, ORGANISM)
+  host_degs$original_gene_id <- original_gene_ids
+  
+  # Find log fold change column
+  lfc_col <- grep("log.*fold|lfc", colnames(host_degs), ignore.case = TRUE, value = TRUE)[1]
+  
+  if(is.na(lfc_col)) {
+    cat("  ❌ No log fold change column found — skipping\n")
+    next
+  }
+  
+  # Separate up/down-regulated
+  upregulated   <- host_degs[host_degs[[lfc_col]] > 0, ]
+  downregulated <- host_degs[host_degs[[lfc_col]] < 0, ]
+  
+  cat(sprintf("  Up-regulated: %d | Down-regulated: %d\n", 
+              nrow(upregulated), nrow(downregulated)))
+  
+  # Summary statistics
+  cat(sprintf("  Log fold change range: %.2f to %.2f\n",
+              min(host_degs[[lfc_col]], na.rm = TRUE),
+              max(host_degs[[lfc_col]], na.rm = TRUE)))
+  
+  # Look for defense-related genes by gene ID patterns (if available)
+  defense_patterns <- c("PR", "PR1", "PR2", "PR3", "PR4", "PR5",  # Pathogenesis-related
+                       "PAL", "CAD", "4CL",                        # Phenylpropanoid pathway
+                       "LOX", "AOS", "AOC",                        # Jasmonic acid pathway
+                       "NPR", "TGA",                               # SA signaling
+                       "WRKY", "ERF",                              # Defense transcription factors
+                       "GST", "CYP",                               # Detoxification
+                       "CHI", "CHS",                               # Flavonoid pathway
+                       "MLO", "RPM", "RPS", "RPP")                 # Resistance genes
+  
+  defense_genes <- host_degs[grepl(paste(defense_patterns, collapse = "|"), 
+                                  host_degs$clean_gene_id, ignore.case = TRUE), ]
+  
+  if(nrow(defense_genes) > 0) {
+    cat(sprintf("  Defense-related genes found: %d\n", nrow(defense_genes)))
+    cat("  Examples:", paste(head(defense_genes$clean_gene_id, 5), collapse = ", "), "\n")
+  }
+  
+  # Create plots
+  # Volcano plot
+  if("pvalue" %in% colnames(host_degs) || "PValue" %in% colnames(host_degs)) {
+    pval_col <- ifelse("pvalue" %in% colnames(host_degs), "pvalue", "PValue")
+    
+    volcano_data <- data.frame(
+      logFC = host_degs[[lfc_col]],
+      negLogP = -log10(host_degs[[pval_col]]),
+      significant = (host_degs[[pval_col]] < 0.05 & abs(host_degs[[lfc_col]]) > 1)
+    )
+    
+    p_volcano <- ggplot(volcano_data, aes(x = logFC, y = negLogP, color = significant)) +
+      geom_point(alpha = 0.6) +
+      scale_color_manual(values = c("FALSE" = "gray", "TRUE" = "red")) +
+      labs(title = sprintf("%s Host DEGs - %s", organism_name, tp),
+           x = "Log2 Fold Change", y = "-log10(p-value)") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+    
+    print(p_volcano)
+  }
+  
+  # Expression distribution
+  p_dist <- ggplot(host_degs, aes(x = !!sym(lfc_col))) +
+    geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+    labs(title = sprintf("Log Fold Change Distribution - %s", tp),
+         x = "Log2 Fold Change", y = "Number of Genes") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  print(p_dist)
+  
+  # Store results
+  all_results[[tp]] <- list(
+    degs = host_degs,
+    n_up = nrow(upregulated),
+    n_down = nrow(downregulated),
+    defense_genes = defense_genes
+  )
+  
+  cat(sprintf("\n✓ Timepoint %s analysis complete\n", tp))
+}
+```
+
+---
+
+# 7. Cross-Timepoint Summary
+
+```{r summary_analysis}
+cat("\n=== CROSS-TIMEPOINT SUMMARY ===\n\n")
+
+if(length(all_results) > 0) {
+  
+  # Create summary table
+  summary_df <- data.frame(
+    Timepoint = character(),
+    Total_DEGs = integer(),
+    Up_regulated = integer(),
+    Down_regulated = integer(),
+    Defense_genes = integer(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (tp in names(all_results)) {
+    r <- all_results[[tp]]
+    summary_df <- rbind(summary_df, data.frame(
+      Timepoint = tp,
+      Total_DEGs = nrow(r$degs),
+      Up_regulated = r$n_up,
+      Down_regulated = r$n_down,
+      Defense_genes = nrow(r$defense_genes),
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  print(summary_df)
+  
+  # Plot summary
+  summary_long <- summary_df %>%
+    select(-Total_DEGs, -Defense_genes) %>%
+    pivot_longer(cols = c(Up_regulated, Down_regulated), 
+                names_to = "Direction", values_to = "Count")
+  
+  p_summary <- ggplot(summary_long, aes(x = Timepoint, y = Count, fill = Direction)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_manual(values = c("Up_regulated" = "red", "Down_regulated" = "blue")) +
+    labs(title = sprintf("%s Host Response Across Time", organism_name),
+         subtitle = "Number of Differentially Expressed Genes",
+         y = "Number of DEGs") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  print(p_summary)
+  
+} else {
+  cat("No results to summarize\n")
+}
+```
+
+---
+
+# 8. Save Results
+
+```{r save_results}
+cat("\n=== SAVING RESULTS ===\n\n")
+
+if(length(all_results) > 0) {
+  
+  output_dir <- sprintf("./%s_host_analysis_simplified", ORGANISM)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+    cat("✓ Created output directory:", output_dir, "\n")
+  }
+  
+  # Save processed DEG files
+  for (tp in names(all_results)) {
+    r <- all_results[[tp]]
+    
+    # Save all DEGs with processed IDs
+    fname <- sprintf("%s_host_DEGs_processed_%s.csv", ORGANISM, tp)
+    write.csv(r$degs, file.path(output_dir, fname), row.names = FALSE)
+    cat("  ✓", fname, "\n")
+    
+    # Save defense genes if found
+    if(nrow(r$defense_genes) > 0) {
+      fname <- sprintf("%s_host_defense_genes_%s.csv", ORGANISM, tp)
+      write.csv(r$defense_genes, file.path(output_dir, fname), row.names = FALSE)
+      cat("  ✓", fname, "\n")
+    }
+  }
+  
+  # Save summary
+  if(exists("summary_df")) {
+    fname <- sprintf("%s_host_summary.csv", ORGANISM)
+    write.csv(summary_df, file.path(output_dir, fname), row.names = FALSE)
+    cat("  ✓", fname, "\n")
+  }
+  
+  cat("\nAll results saved to:", output_dir, "\n")
+  
+} else {
+  cat("No results to save\n")
+}
+```
+
+---
+
+# 9. Next Steps
+
+```{r next_steps}
+cat("\n=== NEXT STEPS FOR FULL GO ENRICHMENT ===\n\n")
+
+cat("This simplified analysis provides an overview of your host DEGs.\n")
+cat("For full GO enrichment analysis, you have several options:\n\n")
+
+cat("OPTION 1 - Install Bioconductor packages:\n")
+cat("```r\n")
+cat("if (!require('BiocManager', quietly = TRUE))\n")
+cat("    install.packages('BiocManager')\n")
+cat("BiocManager::install('org.At.tair.db')  # For Arabidopsis reference\n")
+cat("BiocManager::install('GO.db')           # For GO term descriptions\n")
+cat("```\n\n")
+
+cat("OPTION 2 - Use online enrichment tools:\n")
+cat("- g:Profiler (https://biit.cs.ut.ee/gprofiler/)\n")
+cat("- DAVID (https://david.ncifcrf.gov/)\n")
+cat("- Enrichr (https://maayanlab.cloud/Enrichr/)\n")
+cat("- AgriGO (http://systemsbiology.cau.edu.cn/agriGOv2/)\n\n")
+
+cat("OPTION 3 - Create custom GO annotation files:\n")
+cat("- Download from Phytozome, Ensembl Plants, or other databases\n")
+cat("- Use biomaRt to query online databases\n")
+cat("- Extract from organism-specific annotation files\n\n")
+
+cat("OPTION 4 - Use alternative functional annotation:\n")
+cat("- KEGG pathway analysis\n")
+cat("- InterPro domain analysis\n") 
+cat("- eggNOG functional annotation\n")
+cat("- Mercator4 plant-specific annotation\n\n")
+
+if(length(all_results) > 0) {
+  total_degs <- sum(sapply(all_results, function(x) nrow(x$degs)))
+  cat(sprintf("Your dataset contains %d total DEGs across timepoints.\n", total_degs))
+  cat("This is a good size for functional enrichment analysis!\n")
+}
+```
+
+---
+
+# Session Info
+
+```{r session_info}
+sessionInfo()
+```

@@ -1,0 +1,619 @@
+---
+title: "Cross-Species Comparison: Soybean vs Sunflower Response to S. sclerotiorum"
+author: "Analysis by wan00965"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 10, fig.height = 7)
+```
+
+# Overview
+
+This notebook compares how soybean and sunflower respond to *Sclerotinia sclerotiorum* infection.
+
+**Note:** Run the soybean and sunflower analysis notebooks first, or at least load and process the data in those notebooks before running this comparison.
+
+# Setup
+
+## Load Libraries
+
+```{r load-libraries}
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(RColorBrewer)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+
+
+
+library(ComplexHeatmap)
+library(EnhancedVolcano)
+
+
+
+
+cat("All libraries loaded successfully!\n")
+```
+
+## Set Working Directory
+
+```{r set-directory}
+# Update this path to where your count files are located
+setwd("/Users/andrew20445/Desktop/To_do_list/RNAseq_data/salmon_count_results")
+
+# Verify we're in the right place
+list.files(pattern = "gene_counts.*SALMON")
+```
+
+# Load Data for Both Species
+
+## Load Soybean Data
+
+```{r load-soybean}
+# Load count matrices
+counts_soy_host <- read.table("gene_counts_soybean_SALMON_HOST_only.txt", 
+                              header = TRUE, row.names = 1, check.names = FALSE)
+counts_soy_pathogen <- read.table("gene_counts_soybean_SALMON_PATHOGEN_only.txt", 
+                                  header = TRUE, row.names = 1, check.names = FALSE)
+
+cat(sprintf("Soybean host genes: %d\n", nrow(counts_soy_host)))
+cat(sprintf("Soybean samples: %d\n", ncol(counts_soy_host)))
+```
+
+## Load Sunflower Data
+
+```{r load-sunflower}
+# Load count matrices
+counts_sun_host <- read.table("gene_counts_sunflower_SALMON_HOST_only.txt", 
+                              header = TRUE, row.names = 1, check.names = FALSE)
+counts_sun_pathogen <- read.table("gene_counts_sunflower_SALMON_PATHOGEN_only.txt", 
+                                  header = TRUE, row.names = 1, check.names = FALSE)
+
+cat(sprintf("Sunflower host genes: %d\n", nrow(counts_sun_host)))
+cat(sprintf("Sunflower samples: %d\n", ncol(counts_sun_host)))
+```
+
+## Create Metadata
+
+```{r create-metadata}
+# Parse metadata function - FIXED VERSION
+parse_metadata <- function(sample_names, host) {
+  # Sample name pattern: timepoint_replicate_species_Ssisolate
+  # Examples: "0_1_Gm_NC", "24_1_Gm_BN172", "48_2_Ha_RHA274"
+  
+  # Extract timepoint
+  timepoint <- sapply(sample_names, function(x) {
+    parts <- strsplit(x, "_")[[1]]
+    # Check if last part is "NC" (non-challenged)
+    if(parts[length(parts)] == "NC") {
+      return("NC")
+    } else {
+      # Otherwise use the first number with "h" suffix
+      return(paste0(parts[1], "h"))
+    }
+  })
+  
+  data.frame(
+    sample = sample_names,
+    host = host,
+    timepoint = timepoint,
+    batch = sapply(strsplit(sample_names, "_"), `[`, 2),
+    row.names = sample_names,
+    stringsAsFactors = FALSE
+  )
+}
+
+# Create metadata for each species
+metadata_soy <- parse_metadata(colnames(counts_soy_pathogen), "Soybean")
+metadata_sun <- parse_metadata(colnames(counts_sun_pathogen), "Sunflower")
+
+# Combine metadata
+metadata_combined <- rbind(metadata_soy, metadata_sun)
+metadata_combined$timepoint <- factor(metadata_combined$timepoint, 
+                                     levels = c("NC", "24h", "48h", "96h"))
+metadata_combined$host <- factor(metadata_combined$host)
+metadata_combined$batch <- factor(metadata_combined$batch)
+
+cat("\nCombined samples:\n")
+print(table(metadata_combined$host, metadata_combined$timepoint))
+```
+
+# Pathogen Load Comparison
+
+## Calculate Pathogen Load for Both Species
+
+```{r pathogen-load-calculation}
+# Soybean pathogen load
+pathogen_reads_soy <- colSums(counts_soy_pathogen)
+host_reads_soy <- colSums(counts_soy_host)
+pathogen_pct_soy <- 100 * pathogen_reads_soy / (pathogen_reads_soy + host_reads_soy)
+
+pathogen_load_soy <- data.frame(
+  sample = colnames(counts_soy_pathogen),
+  host = "Soybean",
+  timepoint = metadata_soy$timepoint,
+  pathogen_percent = pathogen_pct_soy
+)
+
+# Sunflower pathogen load
+pathogen_reads_sun <- colSums(counts_sun_pathogen)
+host_reads_sun <- colSums(counts_sun_host)
+pathogen_pct_sun <- 100 * pathogen_reads_sun / (pathogen_reads_sun + host_reads_sun)
+
+pathogen_load_sun <- data.frame(
+  sample = colnames(counts_sun_pathogen),
+  host = "Sunflower",
+  timepoint = metadata_sun$timepoint,
+  pathogen_percent = pathogen_pct_sun
+)
+
+# Combine
+pathogen_load_combined <- rbind(pathogen_load_soy, pathogen_load_sun)
+pathogen_load_combined$timepoint <- factor(pathogen_load_combined$timepoint,
+                                          levels = c("NC", "24h", "48h", "96h"))
+```
+
+## Pathogen Load Progression Plot
+
+```{r pathogen-load-plot}
+ggplot(pathogen_load_combined, aes(x = timepoint, y = pathogen_percent, fill = host)) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.8),
+             alpha = 0.5, size = 2) +
+  scale_fill_manual(values = c("Soybean" = "#E41A1C", "Sunflower" = "#377EB8")) +
+  labs(title = "Pathogen Load Progression: Soybean vs Sunflower",
+       x = "Timepoint",
+       y = "Pathogen reads (%)") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "top")
+```
+
+```{r pathogen-load-plot_3}
+# First, extract isolate information from sample names
+pathogen_load_combined$isolate <- sapply(strsplit(pathogen_load_combined$sample, "_"), `[`, 4)
+
+# Define the isolate color scheme
+Ss_isolate_colors <- c(
+  "WISS47" = "#1f77b4",     # Blue
+  "JS659" = "#1f77b4",      # Blue (same as WISS47)
+  "MNSS6" = "#d62728",      # Red  
+  "Xtra7" = "#d62728",      # Red (same as MNSS6)
+  "BN172" = "#e682fa",      # Purple/Pink
+  "SSPotter" = "#8c564b"    # Brown
+)
+
+# Modified plot with isolate-colored points
+ggplot(pathogen_load_combined, aes(x = timepoint, y = pathogen_percent)) +
+  geom_boxplot(aes(fill = host), position = position_dodge(width = 0.8)) +
+  geom_point(aes(color = isolate), 
+             position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.8),
+             alpha = 0.7, size = 2.5) +
+  scale_fill_manual(values = c("Soybean" = "#ffcb21", "Sunflower" = "#5e3a04")) +
+  scale_color_manual(values = Ss_isolate_colors) +
+  labs(title = "Pathogen Load Progression: Soybean vs Sunflower", 
+       x = "Timepoint", 
+       y = "Pathogen reads (%)",
+       fill = "Host",
+       color = "Isolate") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "top")
+```
+
+```{r pathogen-load-plot_4}
+# Create separate plots for each host
+plot_soybean <- pathogen_load_combined %>%
+  filter(host == "Soybean") %>%
+  ggplot(aes(x = timepoint, y = pathogen_percent)) +
+  geom_boxplot(fill = "#ffcb21", alpha = 0.7) +
+  geom_point(aes(color = isolate), 
+             position = position_jitter(width = 0.2),
+             alpha = 0.8, size = 3) +
+  scale_color_manual(values = Ss_isolate_colors) +
+  labs(title = "Soybean - Pathogen Load by Isolate", 
+       x = "Timepoint", 
+       y = "Pathogen reads (%)",
+       color = "Isolate") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "top")
+
+plot_sunflower <- pathogen_load_combined %>%
+  filter(host == "Sunflower") %>%
+  ggplot(aes(x = timepoint, y = pathogen_percent)) +
+  geom_boxplot(fill = "#5e3a04", alpha = 0.7) +
+  geom_point(aes(color = isolate), 
+             position = position_jitter(width = 0.2),
+             alpha = 0.8, size = 3) +
+  scale_color_manual(values = Ss_isolate_colors) +
+  labs(title = "Sunflower - Pathogen Load by Isolate", 
+       x = "Timepoint", 
+       y = "Pathogen reads (%)",
+       color = "Isolate") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "top")
+
+# Display plots
+plot_soybean
+plot_sunflower
+
+# Or combine them using grid.arrange
+library(gridExtra)
+grid.arrange(plot_soybean, plot_sunflower, nrow = 1)
+```
+
+```{r pathogen-load-plot_2}
+ggplot(pathogen_load_combined, aes(x = timepoint, y = pathogen_percent, fill = host)) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.8),
+             alpha = 0.5, size = 2) +
+  scale_fill_manual(values = c("Soybean" = "#ffcb21", "Sunflower" = "#5e3a04")) +
+  labs(title = "Pathogen Load Progression: Soybean vs Sunflower",
+       x = "Timepoint",
+       y = "Pathogen reads (%)") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "top")
+```
+
+## Pathogen Load Statistics
+
+```{r pathogen-load-stats}
+pathogen_load_summary <- pathogen_load_combined %>%
+  group_by(host, timepoint) %>%
+  summarise(
+    mean_pct = mean(pathogen_percent),
+    sd_pct = sd(pathogen_percent),
+    median_pct = median(pathogen_percent),
+    n = n(),
+    .groups = "drop"
+  )
+
+print(pathogen_load_summary)
+
+# Statistical test (t-test at each timepoint)
+cat("\nT-tests comparing pathogen load between hosts:\n")
+for (tp in c("24h", "48h", "96h")) {
+  soy_vals <- pathogen_load_combined %>% 
+    filter(host == "Soybean", timepoint == tp) %>% 
+    pull(pathogen_percent)
+  sun_vals <- pathogen_load_combined %>% 
+    filter(host == "Sunflower", timepoint == tp) %>% 
+    pull(pathogen_percent)
+  
+  if (length(soy_vals) > 0 && length(sun_vals) > 0) {
+    test_result <- t.test(soy_vals, sun_vals)
+    cat(sprintf("\n%s: p-value = %.4f\n", tp, test_result$p.value))
+    cat(sprintf("  Soybean mean: %.2f%%, Sunflower mean: %.2f%%\n",
+                mean(soy_vals), mean(sun_vals)))
+  }
+}
+```
+
+# Pathogen Response in Different Hosts
+
+## Combine Pathogen Counts
+
+```{r combine-pathogen-counts}
+# Find common pathogen genes
+common_pathogen_genes <- intersect(rownames(counts_soy_pathogen), 
+                                  rownames(counts_sun_pathogen))
+cat(sprintf("Common pathogen genes: %d\n", length(common_pathogen_genes)))
+
+# Combine pathogen counts from both hosts
+counts_pathogen_combined <- cbind(
+  counts_soy_pathogen[common_pathogen_genes, ],
+  counts_sun_pathogen[common_pathogen_genes, ]
+)
+
+cat(sprintf("Combined pathogen data: %d genes × %d samples\n",
+            nrow(counts_pathogen_combined), ncol(counts_pathogen_combined)))
+```
+
+## DESeq2 Analysis - Pathogen in Different Hosts
+
+```{r deseq2-pathogen-combined}
+# IMPORTANT: Round Salmon counts to integers
+counts_pathogen_combined <- round(counts_pathogen_combined)
+
+# Filter low count genes
+keep <- rowSums(counts_pathogen_combined >= 10) >= 3
+counts_pathogen_filtered <- counts_pathogen_combined[keep, ]
+
+cat(sprintf("Pathogen genes after filtering: %d (%.1f%% retained)\n",
+            nrow(counts_pathogen_filtered),
+            100 * nrow(counts_pathogen_filtered) / nrow(counts_pathogen_combined)))
+
+# Create DESeq2 dataset with host as a factor
+# NOTE: batch (replicate number) is nested within isolate within each species —
+# the two experiments were run independently, so batch "1" in soybean and batch
+# "1" in sunflower are unrelated. Including batch causes a rank-deficient matrix.
+dds_pathogen_comparison <- DESeqDataSetFromMatrix(
+  countData = counts_pathogen_filtered,
+  colData = metadata_combined,
+  design = ~ timepoint + host
+)
+
+cat("\nRunning DESeq2 analysis for pathogen comparison...\n")
+dds_pathogen_comparison <- DESeq(dds_pathogen_comparison)
+cat("DESeq2 analysis complete!\n")
+```
+
+## PCA - Pathogen in Both Hosts
+
+```{r pca-pathogen-combined}
+vst_pathogen <- vst(dds_pathogen_comparison, blind = FALSE)
+
+pcaData <- plotPCA(vst_pathogen, intgroup = c("host", "timepoint"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+ggplot(pcaData, aes(PC1, PC2, color = host, shape = timepoint)) +
+  geom_point(size = 4, alpha = 0.8) +
+  scale_color_manual(values = c("Soybean" = "#E41A1C", "Sunflower" = "#377EB8")) +
+  scale_shape_manual(values = c("NC" = 16, "24h" = 17, "48h" = 15, "96h" = 18)) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  labs(title = "PCA - Pathogen Gene Expression in Different Hosts") +
+  theme_bw(base_size = 14)
+```
+
+
+```{r pca-pathogen-combined_noNC}
+# Filter out NC samples and drop the unused "NC" factor level so that
+# scale_shape_manual and VST see exactly the 3 active timepoints.
+dds_pathogen_filtered <- dds_pathogen_comparison[, dds_pathogen_comparison$timepoint != "NC"]
+colData(dds_pathogen_filtered) <- droplevels(colData(dds_pathogen_filtered))
+
+# Create VST with filtered data
+vst_pathogen_filtered <- vst(dds_pathogen_filtered)
+
+# Create PCA data
+pcaData <- plotPCA(vst_pathogen_filtered, intgroup = c("host", "timepoint"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+# Plot with only 3 timepoints
+ggplot(pcaData, aes(PC1, PC2, color = host, shape = timepoint)) +
+  geom_point(size = 4, alpha = 0.8) +
+  scale_color_manual(values = c("Soybean" = "#E41A1C", "Sunflower" = "#377EB8")) +
+  scale_shape_manual(values = c("24h" = 17,    # Triangle
+                               "48h" = 15,    # Square  
+                               "96h" = 18)) + # Diamond
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  labs(title = "PCA - Pathogen Gene Expression in Different Hosts") +
+  theme_bw(base_size = 14)
+```
+
+```{r pca-pathogen-combined_noNC_2}
+# Filter out NC samples and drop the unused "NC" factor level
+dds_pathogen_filtered <- dds_pathogen_comparison[, dds_pathogen_comparison$timepoint != "NC"]
+colData(dds_pathogen_filtered) <- droplevels(colData(dds_pathogen_filtered))
+
+# Create VST with filtered data
+vst_pathogen_filtered <- vst(dds_pathogen_filtered)
+
+# Create PCA data
+pcaData <- plotPCA(vst_pathogen_filtered, intgroup = c("host", "timepoint"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+# Plot with only 3 timepoints
+ggplot(pcaData, aes(PC1, PC2, color = host, shape = timepoint)) +
+  geom_point(size = 4, alpha = 0.8) +
+  scale_color_manual(values = c("Soybean" = "#ffcb21", "Sunflower" = "#5e3a04")) +
+  scale_shape_manual(values = c("24h" = 17,    # Triangle
+                               "48h" = 15,    # Square  
+                               "96h" = 18)) + # Diamond
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  labs(title = "PCA - Pathogen Gene Expression in Different Hosts") +
+  theme_bw(base_size = 14)
+```
+
+
+## Host Effect on Pathogen Genes
+
+```{r pathogen-host-effect}
+# Test for differential pathogen gene expression between hosts
+# Compare Sunflower vs Soybean (overall host effect)
+
+res_host_effect <- results(dds_pathogen_comparison,
+                          contrast = c("host", "Sunflower", "Soybean"),
+                          alpha = 0.05)
+res_host_effect <- res_host_effect[order(res_host_effect$padj), ]
+
+cat("\nPathogen genes differentially expressed between hosts (overall):\n")
+cat(sprintf("  Total genes tested: %d\n", sum(!is.na(res_host_effect$padj))))
+cat(sprintf("  Significant (padj < 0.05): %d\n", 
+            sum(res_host_effect$padj < 0.05, na.rm = TRUE)))
+cat(sprintf("  Higher in sunflower: %d\n", 
+            sum(res_host_effect$padj < 0.05 & res_host_effect$log2FoldChange > 0, na.rm = TRUE)))
+cat(sprintf("  Higher in soybean: %d\n", 
+            sum(res_host_effect$padj < 0.05 & res_host_effect$log2FoldChange < 0, na.rm = TRUE)))
+
+# Top 10 genes
+cat("\nTop 10 pathogen genes with host-specific expression:\n")
+top_genes <- head(as.data.frame(res_host_effect), 10)
+print(top_genes[, c("baseMean", "log2FoldChange", "padj")])
+```
+
+## Volcano Plot - Host Effect on Pathogen
+
+```{r volcano-host-effect, fig.height=8}
+# Create volcano plot data
+volcano_data <- data.frame(
+  gene = rownames(res_host_effect),
+  log2FC = res_host_effect$log2FoldChange,
+  padj = res_host_effect$padj,
+  sig = ifelse(res_host_effect$padj < 0.05, "Significant", "Not Sig")
+)
+
+volcano_data <- volcano_data[!is.na(volcano_data$padj), ]
+
+ggplot(volcano_data, aes(x = log2FC, y = -log10(padj), color = sig)) +
+  geom_point(alpha = 0.6, size = 2) +
+  scale_color_manual(values = c("Significant" = "red", "Not Sig" = "grey")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+  labs(title = "Pathogen Genes: Sunflower vs Soybean",
+       x = "Log2 Fold Change (Sunflower / Soybean)",
+       y = "-Log10(adjusted p-value)",
+       color = "") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "top")
+```
+
+# Compare Number of DEGs
+
+If you've already run the soybean and sunflower notebooks and have the results stored, you can load them here for comparison. Otherwise, this section shows you how to compare once you have those results.
+
+```{r compare-deg-counts, eval=FALSE}
+# This assumes you've saved results from the individual analyses
+# If not, skip this section or run those notebooks first
+
+# Example structure - adjust paths as needed:
+# Load soybean results
+# results_soy_host <- readRDS("soybean_results/results_host_list.rds")
+# results_soy_pathogen <- readRDS("soybean_results/results_pathogen_list.rds")
+
+# Load sunflower results  
+# results_sun_host <- readRDS("sunflower_results/results_host_list.rds")
+# results_sun_pathogen <- readRDS("sunflower_results/results_pathogen_list.rds")
+
+# Then create comparison plots...
+```
+
+## Manual DEG Count Comparison
+
+You can manually create a comparison table from your other notebooks:
+
+```{r manual-comparison-table}
+# Example - fill in with your actual numbers from the other notebooks
+
+deg_summary <- data.frame(
+  Comparison = c("24h_vs_NC", "48h_vs_NC", "96h_vs_NC", "48h_vs_24h", "96h_vs_48h"),
+  Soybean_Host = c(NA, NA, NA, NA, NA),  # Fill these in
+  Sunflower_Host = c(NA, NA, NA, NA, NA),  # Fill these in
+  Soybean_Pathogen = c(NA, NA, NA, NA, NA),  # Fill these in
+  Sunflower_Pathogen = c(NA, NA, NA, NA, NA)  # Fill these in
+)
+
+cat("To complete this comparison:\n")
+cat("1. Run soybean_salmon_analysis.Rmd and note the DEG counts\n")
+cat("2. Run sunflower_salmon_analysis.Rmd and note the DEG counts\n")
+cat("3. Fill in the numbers in the table above\n")
+cat("4. Rerun this section to create comparison plots\n")
+```
+
+# Summary
+
+```{r summary}
+cat(paste(rep("=", 80), collapse = ""), "\n")
+cat("CROSS-SPECIES COMPARISON SUMMARY\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+cat("PATHOGEN LOAD COMPARISON:\n")
+cat("-------------------------\n")
+print(pathogen_load_summary)
+
+cat("\n\nPATHOGEN GENE EXPRESSION IN DIFFERENT HOSTS:\n")
+cat("--------------------------------------------\n")
+cat(sprintf("Common pathogen genes analyzed: %d\n", nrow(counts_pathogen_filtered)))
+cat(sprintf("Genes with host-specific expression (padj < 0.05): %d\n",
+            sum(res_host_effect$padj < 0.05, na.rm = TRUE)))
+
+cat("\n\nKEY OBSERVATIONS:\n")
+cat("-----------------\n")
+
+# Compare 96h pathogen load
+soy_96h <- pathogen_load_summary %>% 
+  filter(host == "Soybean", timepoint == "96h") %>% 
+  pull(mean_pct)
+sun_96h <- pathogen_load_summary %>% 
+  filter(host == "Sunflower", timepoint == "96h") %>% 
+  pull(mean_pct)
+
+if (length(soy_96h) > 0 && length(sun_96h) > 0) {
+  cat(sprintf("1. At 96h, pathogen load:\n"))
+  cat(sprintf("   - Soybean: %.2f%%\n", soy_96h))
+  cat(sprintf("   - Sunflower: %.2f%%\n", sun_96h))
+  if (abs(soy_96h - sun_96h) > 5) {
+    higher_host <- ifelse(soy_96h > sun_96h, "Soybean", "Sunflower")
+    cat(sprintf("   - %s shows higher pathogen accumulation\n", higher_host))
+  } else {
+    cat("   - Similar pathogen accumulation in both hosts\n")
+  }
+}
+
+cat("\n2. Pathogen adaptation to different hosts:\n")
+cat(sprintf("   - %d pathogen genes show host-specific expression patterns\n",
+            sum(res_host_effect$padj < 0.05, na.rm = TRUE)))
+
+cat("\n3. To complete the analysis:\n")
+cat("   - Run soybean and sunflower notebooks to get host response data\n")
+cat("   - Compare defense gene activation between species\n")
+cat("   - Identify species-specific resistance mechanisms\n")
+```
+
+# Export Results
+
+```{r export-results, eval=FALSE}
+# Create output directory
+dir.create("comparison_results", showWarnings = FALSE)
+
+# Save pathogen load comparison
+write.csv(pathogen_load_combined,
+          "comparison_results/pathogen_load_comparison.csv",
+          row.names = FALSE)
+
+write.csv(pathogen_load_summary,
+          "comparison_results/pathogen_load_summary.csv",
+          row.names = FALSE)
+
+# Save host-specific pathogen gene expression
+write.csv(as.data.frame(res_host_effect),
+          "comparison_results/pathogen_host_effect_all.csv")
+
+# Save significant host-specific genes
+sig_genes <- subset(res_host_effect, padj < 0.05)
+if (nrow(sig_genes) > 0) {
+  write.csv(as.data.frame(sig_genes),
+            "comparison_results/pathogen_host_effect_significant.csv")
+}
+
+cat("Results exported to comparison_results/\n")
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
+
+---
+
+## Notes
+
+**To get the most from this notebook:**
+
+1. Run `soybean_salmon_analysis.Rmd` first
+2. Run `sunflower_salmon_analysis.Rmd` second  
+3. Then run this comparison notebook
+
+This will give you:
+- Individual species analyses
+- Cross-species pathogen load comparison
+- Pathogen adaptation analysis
+- Foundation for understanding host-pathogen interactions
+
+**Key Questions to Explore:**
+
+1. Does pathogen accumulate faster in one host?
+2. Do pathogen genes show host-specific expression?
+3. Which host has stronger defense response?
+4. Are there common vs. species-specific defense mechanisms?

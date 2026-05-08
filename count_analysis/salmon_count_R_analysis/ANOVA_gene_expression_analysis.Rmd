@@ -1,0 +1,963 @@
+---
+title: "ANOVA & Pairwise Comparisons — Gene Expression"
+subtitle: "PERMANOVA (whole-transcriptome) + per-gene ANOVA (FDR-corrected)"
+author: "Analysis by wan00965"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 7)
+```
+
+# Overview
+
+This notebook runs two complementary ANOVA approaches on the RNA-seq
+expression data:
+
+| Approach | Scope | What it tells you |
+|----------|-------|-------------------|
+| **PERMANOVA** (vegan::adonis2) | Whole-transcriptome distance matrix | How much of the *overall* transcriptional variance each factor explains (fills the ANOVA table with one row per factor) |
+| **Per-gene ANOVA** | Each gene independently, FDR-corrected | Which *individual genes* are significantly affected by each factor |
+
+**Three analyses are run:**
+
+1. **Pathogen (Ss) genes across both hosts** — factors: Host, Isolate, Timepoint, Block
+2. **Soybean host (Gm) genes** — factors: Isolate, Timepoint, Block
+3. **Sunflower host (Ha) genes** — factors: Isolate, Timepoint, Block
+
+> **Prerequisite:** Run both individual species notebooks first so that
+> count matrices and metadata exist, OR run the data-loading chunks from
+> `Overall_cross_species_20260326.Rmd`.
+
+# Setup
+
+```{r load-libraries}
+library(DESeq2)
+library(vegan)       # PERMANOVA
+library(car)         # Type III ANOVA
+library(emmeans)     # pairwise comparisons
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(pheatmap)
+library(RColorBrewer)
+library(gridExtra)
+
+cat("All libraries loaded.\n")
+```
+
+```{r set-directory}
+setwd("/Users/andrew20445/Desktop/To_do_list/RNAseq_data/New_salmon_round3/new_run_count")
+dir.create("anova_results", showWarnings = FALSE)
+```
+
+# Load and Prepare Data
+
+## Load count matrices
+
+```{r load-counts}
+# ── Soybean ──
+counts_soy_host     <- read.table("gene_counts_soybean_SALMON_HOST_only.txt",
+                                   header = TRUE, row.names = 1, check.names = FALSE)
+counts_soy_pathogen <- read.table("gene_counts_soybean_SALMON_PATHOGEN_only.txt",
+                                   header = TRUE, row.names = 1, check.names = FALSE)
+
+# ── Sunflower ──
+counts_sun_host     <- read.table("gene_counts_sunflower_SALMON_HOST_only.txt",
+                                   header = TRUE, row.names = 1, check.names = FALSE)
+counts_sun_pathogen <- read.table("gene_counts_sunflower_SALMON_PATHOGEN_only.txt",
+                                   header = TRUE, row.names = 1, check.names = FALSE)
+
+cat(sprintf("Soybean:   %d host genes,  %d pathogen genes, %d samples\n",
+            nrow(counts_soy_host), nrow(counts_soy_pathogen), ncol(counts_soy_host)))
+cat(sprintf("Sunflower: %d host genes,  %d pathogen genes, %d samples\n",
+            nrow(counts_sun_host), nrow(counts_sun_pathogen), ncol(counts_sun_host)))
+```
+
+## Build metadata
+
+```{r build-metadata}
+# ── Helper function ──
+build_metadata <- function(sample_names, host_label) {
+  data.frame(
+    sample    = sample_names,
+    host      = host_label,
+    timepoint = sapply(sample_names, function(x) {
+      parts <- strsplit(x, "_")[[1]]
+      if (parts[length(parts)] == "NC") "NC" else paste0(parts[1], "h")
+    }),
+    block     = sapply(strsplit(sample_names, "_"), `[`, 2),
+    isolate   = sapply(strsplit(sample_names, "_"), `[`, 4),
+    row.names = sample_names,
+    stringsAsFactors = FALSE
+  )
+}
+
+meta_soy <- build_metadata(colnames(counts_soy_host), "Soybean")
+meta_sun <- build_metadata(colnames(counts_sun_host), "Sunflower")
+
+# Combined metadata (for pathogen analysis across hosts)
+meta_all <- rbind(meta_soy, meta_sun)
+meta_all$host      <- factor(meta_all$host)
+meta_all$timepoint <- factor(meta_all$timepoint, levels = c("NC","24h","48h","96h"))
+meta_all$block     <- factor(meta_all$block)
+meta_all$isolate   <- factor(meta_all$isolate,
+                             levels = c("NC","WISS47","JS659","MNSS6","Xtra7","BN172","SSPotter"))
+
+cat("Combined sample counts:\n")
+print(table(meta_all$host, meta_all$timepoint))
+```
+
+## Prepare DESeq2 objects and VST
+
+```{r prepare-deseq-objects}
+# ── Helper: build DESeq2 + VST, excluding NC, returning filtered VST matrix + metadata ──
+prepare_vst <- function(counts, metadata, design_formula, min_count = 10, min_samples = 3) {
+  counts <- round(counts)
+  keep   <- rowSums(counts >= min_count) >= min_samples
+  counts <- counts[keep, ]
+  
+  dds <- DESeqDataSetFromMatrix(countData = counts,
+                                colData   = metadata,
+                                design    = design_formula)
+  dds <- DESeq(dds)
+  vst_obj <- vst(dds, blind = FALSE)
+  
+  # Exclude NC samples
+  idx <- vst_obj$timepoint != "NC"
+  vst_obj <- vst_obj[, idx]
+  colData(vst_obj) <- droplevels(colData(vst_obj))
+  
+  return(vst_obj)
+}
+
+# ── 1. Pathogen genes: combine across hosts ──
+common_pathogen_genes <- intersect(rownames(counts_soy_pathogen),
+                                   rownames(counts_sun_pathogen))
+counts_pathogen_combined <- cbind(counts_soy_pathogen[common_pathogen_genes, ],
+                                  counts_sun_pathogen[common_pathogen_genes, ])
+cat(sprintf("Common pathogen genes: %d\n", length(common_pathogen_genes)))
+
+vst_pathogen <- prepare_vst(counts_pathogen_combined, meta_all, ~ timepoint + host)
+
+# ── 2. Soybean host genes ──
+vst_soy_host <- prepare_vst(counts_soy_host, meta_soy, ~ timepoint)
+
+# ── 3. Sunflower host genes ──
+vst_sun_host <- prepare_vst(counts_sun_host, meta_sun, ~ timepoint)
+
+cat(sprintf("\nAfter filtering & excluding NC:\n"))
+cat(sprintf("  Pathogen genes (combined): %d genes × %d samples\n",
+            nrow(vst_pathogen), ncol(vst_pathogen)))
+cat(sprintf("  Soybean host genes:        %d genes × %d samples\n",
+            nrow(vst_soy_host), ncol(vst_soy_host)))
+cat(sprintf("  Sunflower host genes:      %d genes × %d samples\n",
+            nrow(vst_sun_host), ncol(vst_sun_host)))
+```
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PART A: Pathogen Genes Across Both Hosts
+# ═══════════════════════════════════════════════════════════════════════════
+
+# A1. PERMANOVA — Pathogen Genes
+
+```{r permanova-pathogen}
+# Extract VST expression matrix (genes × samples → transpose to samples × genes)
+expr_pathogen <- t(assay(vst_pathogen))
+
+# Build sample-level factor table
+perm_meta_pathogen <- data.frame(
+  host      = vst_pathogen$host,
+  isolate   = vst_pathogen$isolate,
+  timepoint = vst_pathogen$timepoint,
+  block     = vst_pathogen$block,
+  row.names = colnames(vst_pathogen)
+)
+
+# Drop unused factor levels
+perm_meta_pathogen <- droplevels(perm_meta_pathogen)
+
+# Euclidean distance on VST values
+dist_pathogen <- vegdist(expr_pathogen, method = "euclidean")
+
+# PERMANOVA — sequential (Type I) with 999 permutations
+set.seed(42)
+perm_pathogen <- adonis2(dist_pathogen ~ host + isolate + timepoint + block,
+                         data       = perm_meta_pathogen,
+                         permutations = 999,
+                         method     = "euclidean",
+                         by         = "margin")  # marginal (Type III-like)
+
+cat("══════ PERMANOVA — Pathogen Genes (marginal) ══════\n")
+print(perm_pathogen)
+```
+
+```{r permanova-pathogen-table}
+# ── Build publication table from PERMANOVA ──
+perm_df <- as.data.frame(perm_pathogen)
+
+# Calculate eta-squared (R2 is already provided by adonis2)
+pub_perm_pathogen <- data.frame(
+  Source   = c("Host", "S. sclerotiorum isolate", "Inoculated timepoint",
+               "Block (biological replicates)", "Residual", "Total"),
+  df       = perm_df$Df,
+  SS       = round(perm_df$SumOfSqs, 2),
+  MS       = round(ifelse(perm_df$Df > 0, perm_df$SumOfSqs / perm_df$Df, NA), 2),
+  F_value  = round(perm_df$F, 2),
+  p_value  = perm_df$`Pr(>F)`,
+  R2       = round(perm_df$R2, 4)
+)
+
+cat("\n══════ Publication-Ready PERMANOVA Table — Pathogen Genes ══════\n")
+print(pub_perm_pathogen, row.names = FALSE, na.print = "")
+
+write.csv(pub_perm_pathogen,
+          "anova_results/PERMANOVA_pathogen_genes.csv", row.names = FALSE)
+```
+
+## A2. Per-Gene ANOVA — Pathogen Genes
+
+```{r pergene-anova-pathogen}
+# VST expression matrix: genes in rows, samples in columns
+expr_mat <- assay(vst_pathogen)
+
+# Factor table (same as PERMANOVA)
+gene_meta <- perm_meta_pathogen
+
+# Sum-to-zero contrasts for Type III
+options(contrasts = c("contr.sum", "contr.poly"))
+
+cat("Running per-gene ANOVA for", nrow(expr_mat), "pathogen genes...\n")
+
+# ── Run ANOVA on each gene ──
+pergene_results_pathogen <- do.call(rbind, lapply(seq_len(nrow(expr_mat)), function(i) {
+  df_gene <- data.frame(expr = expr_mat[i, ], gene_meta)
+  
+  fit <- tryCatch(
+    lm(expr ~ host + isolate + timepoint + block, data = df_gene),
+    error = function(e) NULL
+  )
+  if (is.null(fit)) {
+    return(data.frame(gene = rownames(expr_mat)[i],
+                      F_host = NA, p_host = NA,
+                      F_isolate = NA, p_isolate = NA,
+                      F_timepoint = NA, p_timepoint = NA,
+                      F_block = NA, p_block = NA))
+  }
+  
+  av <- tryCatch(Anova(fit, type = "III"), error = function(e) NULL)
+  if (is.null(av)) {
+    return(data.frame(gene = rownames(expr_mat)[i],
+                      F_host = NA, p_host = NA,
+                      F_isolate = NA, p_isolate = NA,
+                      F_timepoint = NA, p_timepoint = NA,
+                      F_block = NA, p_block = NA))
+  }
+  
+  data.frame(
+    gene        = rownames(expr_mat)[i],
+    F_host      = av["host",      "F value"],
+    p_host      = av["host",      "Pr(>F)"],
+    F_isolate   = av["isolate",   "F value"],
+    p_isolate   = av["isolate",   "Pr(>F)"],
+    F_timepoint = av["timepoint", "F value"],
+    p_timepoint = av["timepoint", "Pr(>F)"],
+    F_block     = av["block",     "F value"],
+    p_block     = av["block",     "Pr(>F)"]
+  )
+}))
+
+# ── FDR correction (BH) per factor ──
+pergene_results_pathogen$padj_host      <- p.adjust(pergene_results_pathogen$p_host,      method = "BH")
+pergene_results_pathogen$padj_isolate   <- p.adjust(pergene_results_pathogen$p_isolate,   method = "BH")
+pergene_results_pathogen$padj_timepoint <- p.adjust(pergene_results_pathogen$p_timepoint, method = "BH")
+pergene_results_pathogen$padj_block     <- p.adjust(pergene_results_pathogen$p_block,     method = "BH")
+
+cat("\n══════ Per-Gene ANOVA Summary — Pathogen Genes (padj < 0.05) ══════\n")
+cat(sprintf("  Host effect:      %d genes\n",
+            sum(pergene_results_pathogen$padj_host < 0.05, na.rm = TRUE)))
+cat(sprintf("  Isolate effect:   %d genes\n",
+            sum(pergene_results_pathogen$padj_isolate < 0.05, na.rm = TRUE)))
+cat(sprintf("  Timepoint effect: %d genes\n",
+            sum(pergene_results_pathogen$padj_timepoint < 0.05, na.rm = TRUE)))
+cat(sprintf("  Block effect:     %d genes\n",
+            sum(pergene_results_pathogen$padj_block < 0.05, na.rm = TRUE)))
+
+write.csv(pergene_results_pathogen,
+          "anova_results/pergene_ANOVA_pathogen_all.csv", row.names = FALSE)
+
+# ── Export significant gene lists per factor ──
+for (fac in c("host", "isolate", "timepoint")) {
+  col_padj <- paste0("padj_", fac)
+  sig <- pergene_results_pathogen %>%
+    filter(.data[[col_padj]] < 0.05) %>%
+    arrange(.data[[col_padj]])
+  write.csv(sig,
+            sprintf("anova_results/pergene_ANOVA_pathogen_sig_%s.csv", fac),
+            row.names = FALSE)
+  cat(sprintf("  Saved %d significant genes for %s effect\n", nrow(sig), fac))
+}
+```
+
+## A3. Per-Gene Pairwise Comparisons — Pathogen Genes
+
+For factors with >2 levels (isolate, timepoint), we use `emmeans` to run
+Tukey-adjusted pairwise comparisons on genes that are significant for that
+factor.
+
+```{r pairwise-pathogen-isolate}
+# ── Isolate pairwise (on significant genes only) ──
+sig_isolate_genes <- pergene_results_pathogen$gene[
+  which(pergene_results_pathogen$padj_isolate < 0.05)
+]
+
+cat(sprintf("\nRunning isolate pairwise comparisons for %d significant pathogen genes...\n",
+            length(sig_isolate_genes)))
+
+if (length(sig_isolate_genes) > 0) {
+  # Limit to top 500 if very many (for speed)
+  genes_to_test <- head(sig_isolate_genes, 500)
+  
+  pairwise_isolate_list <- lapply(genes_to_test, function(g) {
+    df_gene <- data.frame(expr = expr_mat[g, ], gene_meta)
+    fit <- lm(expr ~ host + isolate + timepoint + block, data = df_gene)
+    emm <- emmeans(fit, pairwise ~ isolate, adjust = "tukey")
+    contr <- as.data.frame(summary(emm$contrasts))
+    contr$gene <- g
+    return(contr)
+  })
+  
+  pairwise_isolate_pathogen <- do.call(rbind, pairwise_isolate_list)
+  write.csv(pairwise_isolate_pathogen,
+            "anova_results/pairwise_isolate_pathogen.csv", row.names = FALSE)
+  
+  cat(sprintf("  Saved %d pairwise comparisons across %d genes\n",
+              nrow(pairwise_isolate_pathogen), length(genes_to_test)))
+}
+```
+
+```{r pairwise-pathogen-timepoint}
+# ── Timepoint pairwise (on significant genes only) ──
+sig_timepoint_genes <- pergene_results_pathogen$gene[
+  which(pergene_results_pathogen$padj_timepoint < 0.05)
+]
+
+cat(sprintf("\nRunning timepoint pairwise comparisons for %d significant pathogen genes...\n",
+            length(sig_timepoint_genes)))
+
+if (length(sig_timepoint_genes) > 0) {
+  genes_to_test <- head(sig_timepoint_genes, 500)
+  
+  pairwise_tp_list <- lapply(genes_to_test, function(g) {
+    df_gene <- data.frame(expr = expr_mat[g, ], gene_meta)
+    fit <- lm(expr ~ host + isolate + timepoint + block, data = df_gene)
+    emm <- emmeans(fit, pairwise ~ timepoint, adjust = "tukey")
+    contr <- as.data.frame(summary(emm$contrasts))
+    contr$gene <- g
+    return(contr)
+  })
+  
+  pairwise_tp_pathogen <- do.call(rbind, pairwise_tp_list)
+  write.csv(pairwise_tp_pathogen,
+            "anova_results/pairwise_timepoint_pathogen.csv", row.names = FALSE)
+  
+  cat(sprintf("  Saved %d pairwise comparisons across %d genes\n",
+              nrow(pairwise_tp_pathogen), length(genes_to_test)))
+}
+```
+
+```{r pairwise-pathogen-host}
+# ── Host pairwise (just 2 levels, but extract for all significant genes) ──
+sig_host_genes <- pergene_results_pathogen$gene[
+  which(pergene_results_pathogen$padj_host < 0.05)
+]
+
+cat(sprintf("\nRunning host pairwise comparisons for %d significant pathogen genes...\n",
+            length(sig_host_genes)))
+
+if (length(sig_host_genes) > 0) {
+  genes_to_test <- head(sig_host_genes, 500)
+  
+  pairwise_host_list <- lapply(genes_to_test, function(g) {
+    df_gene <- data.frame(expr = expr_mat[g, ], gene_meta)
+    fit <- lm(expr ~ host + isolate + timepoint + block, data = df_gene)
+    emm <- emmeans(fit, pairwise ~ host, adjust = "tukey")
+    contr <- as.data.frame(summary(emm$contrasts))
+    contr$gene <- g
+    # Also get the means
+    means <- as.data.frame(summary(emm$emmeans))
+    contr$mean_soybean   <- means$emmean[means$host == "Soybean"]
+    contr$mean_sunflower <- means$emmean[means$host == "Sunflower"]
+    return(contr)
+  })
+  
+  pairwise_host_pathogen <- do.call(rbind, pairwise_host_list)
+  write.csv(pairwise_host_pathogen,
+            "anova_results/pairwise_host_pathogen.csv", row.names = FALSE)
+  
+  cat(sprintf("  Saved %d pairwise comparisons\n", nrow(pairwise_host_pathogen)))
+}
+```
+
+## A4. Summary Visualizations — Pathogen
+
+```{r viz-pathogen-venn, fig.height=6}
+# Bar chart of significant gene counts per factor
+sig_counts_pathogen <- data.frame(
+  Factor = c("Host", "Isolate", "Timepoint", "Block"),
+  n_sig  = c(
+    sum(pergene_results_pathogen$padj_host      < 0.05, na.rm = TRUE),
+    sum(pergene_results_pathogen$padj_isolate   < 0.05, na.rm = TRUE),
+    sum(pergene_results_pathogen$padj_timepoint < 0.05, na.rm = TRUE),
+    sum(pergene_results_pathogen$padj_block     < 0.05, na.rm = TRUE)
+  )
+)
+sig_counts_pathogen$Factor <- factor(sig_counts_pathogen$Factor,
+                                     levels = c("Host","Isolate","Timepoint","Block"))
+
+ggplot(sig_counts_pathogen, aes(x = Factor, y = n_sig, fill = Factor)) +
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = n_sig), vjust = -0.5, size = 5) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Pathogen Genes: Significant Genes per Factor (padj < 0.05)",
+       subtitle = "Per-gene Type III ANOVA, BH-corrected",
+       y = "Number of significant genes", x = "") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "none")
+```
+
+```{r viz-pathogen-pvalue-hist, fig.height=8}
+# P-value histograms (diagnostic — should be uniform under null + spike at 0)
+par(mfrow = c(2, 2))
+hist(pergene_results_pathogen$p_host,      breaks = 50, main = "Host",      xlab = "p-value", col = "lightblue")
+hist(pergene_results_pathogen$p_isolate,   breaks = 50, main = "Isolate",   xlab = "p-value", col = "lightgreen")
+hist(pergene_results_pathogen$p_timepoint, breaks = 50, main = "Timepoint", xlab = "p-value", col = "lightyellow")
+hist(pergene_results_pathogen$p_block,     breaks = 50, main = "Block",     xlab = "p-value", col = "lightgrey")
+par(mfrow = c(1, 1))
+```
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PART B: Soybean Host Genes
+# ═══════════════════════════════════════════════════════════════════════════
+
+# B1. PERMANOVA — Soybean Host Genes
+
+```{r permanova-soybean-host}
+expr_soy_host <- t(assay(vst_soy_host))
+
+perm_meta_soy <- data.frame(
+  isolate   = vst_soy_host$isolate,
+  timepoint = vst_soy_host$timepoint,
+  block     = vst_soy_host$block,
+  row.names = colnames(vst_soy_host)
+)
+perm_meta_soy <- droplevels(perm_meta_soy)
+
+dist_soy_host <- vegdist(expr_soy_host, method = "euclidean")
+
+set.seed(42)
+perm_soy_host <- adonis2(dist_soy_host ~ isolate + timepoint + block,
+                          data = perm_meta_soy,
+                          permutations = 999,
+                          method = "euclidean",
+                          by = "margin")
+
+cat("══════ PERMANOVA — Soybean Host Genes (marginal) ══════\n")
+print(perm_soy_host)
+
+# Publication table
+perm_df_soy <- as.data.frame(perm_soy_host)
+pub_perm_soy <- data.frame(
+  Source   = c("S. sclerotiorum isolate", "Inoculated timepoint",
+               "Block (biological replicates)", "Residual", "Total"),
+  df       = perm_df_soy$Df,
+  SS       = round(perm_df_soy$SumOfSqs, 2),
+  MS       = round(ifelse(perm_df_soy$Df > 0, perm_df_soy$SumOfSqs / perm_df_soy$Df, NA), 2),
+  F_value  = round(perm_df_soy$F, 2),
+  p_value  = perm_df_soy$`Pr(>F)`,
+  R2       = round(perm_df_soy$R2, 4)
+)
+print(pub_perm_soy, row.names = FALSE, na.print = "")
+write.csv(pub_perm_soy,
+          "anova_results/PERMANOVA_soybean_host_genes.csv", row.names = FALSE)
+```
+
+## B2. Per-Gene ANOVA — Soybean Host Genes
+
+```{r pergene-anova-soybean-host}
+expr_mat_soy <- assay(vst_soy_host)
+gene_meta_soy <- perm_meta_soy
+
+options(contrasts = c("contr.sum", "contr.poly"))
+
+cat("Running per-gene ANOVA for", nrow(expr_mat_soy), "soybean host genes...\n")
+
+pergene_results_soy <- do.call(rbind, lapply(seq_len(nrow(expr_mat_soy)), function(i) {
+  df_gene <- data.frame(expr = expr_mat_soy[i, ], gene_meta_soy)
+  
+  fit <- tryCatch(
+    lm(expr ~ isolate + timepoint + block, data = df_gene),
+    error = function(e) NULL
+  )
+  if (is.null(fit)) {
+    return(data.frame(gene = rownames(expr_mat_soy)[i],
+                      F_isolate = NA, p_isolate = NA,
+                      F_timepoint = NA, p_timepoint = NA,
+                      F_block = NA, p_block = NA))
+  }
+  
+  av <- tryCatch(Anova(fit, type = "III"), error = function(e) NULL)
+  if (is.null(av)) {
+    return(data.frame(gene = rownames(expr_mat_soy)[i],
+                      F_isolate = NA, p_isolate = NA,
+                      F_timepoint = NA, p_timepoint = NA,
+                      F_block = NA, p_block = NA))
+  }
+  
+  data.frame(
+    gene        = rownames(expr_mat_soy)[i],
+    F_isolate   = av["isolate",   "F value"],
+    p_isolate   = av["isolate",   "Pr(>F)"],
+    F_timepoint = av["timepoint", "F value"],
+    p_timepoint = av["timepoint", "Pr(>F)"],
+    F_block     = av["block",     "F value"],
+    p_block     = av["block",     "Pr(>F)"]
+  )
+}))
+
+# FDR correction
+pergene_results_soy$padj_isolate   <- p.adjust(pergene_results_soy$p_isolate,   method = "BH")
+pergene_results_soy$padj_timepoint <- p.adjust(pergene_results_soy$p_timepoint, method = "BH")
+pergene_results_soy$padj_block     <- p.adjust(pergene_results_soy$p_block,     method = "BH")
+
+cat("\n══════ Per-Gene ANOVA Summary — Soybean Host (padj < 0.05) ══════\n")
+cat(sprintf("  Isolate effect:   %d genes\n",
+            sum(pergene_results_soy$padj_isolate < 0.05, na.rm = TRUE)))
+cat(sprintf("  Timepoint effect: %d genes\n",
+            sum(pergene_results_soy$padj_timepoint < 0.05, na.rm = TRUE)))
+cat(sprintf("  Block effect:     %d genes\n",
+            sum(pergene_results_soy$padj_block < 0.05, na.rm = TRUE)))
+
+write.csv(pergene_results_soy,
+          "anova_results/pergene_ANOVA_soybean_host_all.csv", row.names = FALSE)
+
+for (fac in c("isolate", "timepoint")) {
+  col_padj <- paste0("padj_", fac)
+  sig <- pergene_results_soy %>%
+    filter(.data[[col_padj]] < 0.05) %>%
+    arrange(.data[[col_padj]])
+  write.csv(sig,
+            sprintf("anova_results/pergene_ANOVA_soybean_host_sig_%s.csv", fac),
+            row.names = FALSE)
+}
+```
+
+## B3. Pairwise Comparisons — Soybean Host Genes
+
+```{r pairwise-soybean-isolate}
+sig_iso_soy <- pergene_results_soy$gene[
+  which(pergene_results_soy$padj_isolate < 0.05)
+]
+
+cat(sprintf("Running isolate pairwise for %d significant soybean host genes...\n",
+            length(sig_iso_soy)))
+
+if (length(sig_iso_soy) > 0) {
+  genes_to_test <- head(sig_iso_soy, 500)
+  
+  pw_list <- lapply(genes_to_test, function(g) {
+    df_gene <- data.frame(expr = expr_mat_soy[g, ], gene_meta_soy)
+    fit <- lm(expr ~ isolate + timepoint + block, data = df_gene)
+    emm <- emmeans(fit, pairwise ~ isolate, adjust = "tukey")
+    contr <- as.data.frame(summary(emm$contrasts))
+    contr$gene <- g
+    return(contr)
+  })
+  
+  pairwise_iso_soy <- do.call(rbind, pw_list)
+  write.csv(pairwise_iso_soy,
+            "anova_results/pairwise_isolate_soybean_host.csv", row.names = FALSE)
+  cat(sprintf("  Saved %d comparisons for %d genes\n",
+              nrow(pairwise_iso_soy), length(genes_to_test)))
+}
+```
+
+```{r pairwise-soybean-timepoint}
+sig_tp_soy <- pergene_results_soy$gene[
+  which(pergene_results_soy$padj_timepoint < 0.05)
+]
+
+cat(sprintf("Running timepoint pairwise for %d significant soybean host genes...\n",
+            length(sig_tp_soy)))
+
+if (length(sig_tp_soy) > 0) {
+  genes_to_test <- head(sig_tp_soy, 500)
+  
+  pw_list <- lapply(genes_to_test, function(g) {
+    df_gene <- data.frame(expr = expr_mat_soy[g, ], gene_meta_soy)
+    fit <- lm(expr ~ isolate + timepoint + block, data = df_gene)
+    emm <- emmeans(fit, pairwise ~ timepoint, adjust = "tukey")
+    contr <- as.data.frame(summary(emm$contrasts))
+    contr$gene <- g
+    return(contr)
+  })
+  
+  pairwise_tp_soy <- do.call(rbind, pw_list)
+  write.csv(pairwise_tp_soy,
+            "anova_results/pairwise_timepoint_soybean_host.csv", row.names = FALSE)
+  cat(sprintf("  Saved %d comparisons for %d genes\n",
+              nrow(pairwise_tp_soy), length(genes_to_test)))
+}
+```
+
+## B4. Summary Visualizations — Soybean
+
+```{r viz-soybean-host, fig.height=4}
+sig_counts_soy <- data.frame(
+  Factor = c("Isolate", "Timepoint", "Block"),
+  n_sig  = c(
+    sum(pergene_results_soy$padj_isolate   < 0.05, na.rm = TRUE),
+    sum(pergene_results_soy$padj_timepoint < 0.05, na.rm = TRUE),
+    sum(pergene_results_soy$padj_block     < 0.05, na.rm = TRUE)
+  )
+)
+sig_counts_soy$Factor <- factor(sig_counts_soy$Factor,
+                                 levels = c("Isolate","Timepoint","Block"))
+
+ggplot(sig_counts_soy, aes(x = Factor, y = n_sig, fill = Factor)) +
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = n_sig), vjust = -0.5, size = 5) +
+  scale_fill_manual(values = c("#E41A1C","#FFD700","#999999")) +
+  labs(title = "Soybean Host Genes: Significant per Factor (padj < 0.05)",
+       y = "Number of significant genes", x = "") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "none")
+```
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PART C: Sunflower Host Genes
+# ═══════════════════════════════════════════════════════════════════════════
+
+# C1. PERMANOVA — Sunflower Host Genes
+
+```{r permanova-sunflower-host}
+expr_sun_host <- t(assay(vst_sun_host))
+
+perm_meta_sun <- data.frame(
+  isolate   = vst_sun_host$isolate,
+  timepoint = vst_sun_host$timepoint,
+  block     = vst_sun_host$block,
+  row.names = colnames(vst_sun_host)
+)
+perm_meta_sun <- droplevels(perm_meta_sun)
+
+dist_sun_host <- vegdist(expr_sun_host, method = "euclidean")
+
+set.seed(42)
+perm_sun_host <- adonis2(dist_sun_host ~ isolate + timepoint + block,
+                          data = perm_meta_sun,
+                          permutations = 999,
+                          method = "euclidean",
+                          by = "margin")
+
+cat("══════ PERMANOVA — Sunflower Host Genes (marginal) ══════\n")
+print(perm_sun_host)
+
+perm_df_sun <- as.data.frame(perm_sun_host)
+pub_perm_sun <- data.frame(
+  Source   = c("S. sclerotiorum isolate", "Inoculated timepoint",
+               "Block (biological replicates)", "Residual", "Total"),
+  df       = perm_df_sun$Df,
+  SS       = round(perm_df_sun$SumOfSqs, 2),
+  MS       = round(ifelse(perm_df_sun$Df > 0, perm_df_sun$SumOfSqs / perm_df_sun$Df, NA), 2),
+  F_value  = round(perm_df_sun$F, 2),
+  p_value  = perm_df_sun$`Pr(>F)`,
+  R2       = round(perm_df_sun$R2, 4)
+)
+print(pub_perm_sun, row.names = FALSE, na.print = "")
+write.csv(pub_perm_sun,
+          "anova_results/PERMANOVA_sunflower_host_genes.csv", row.names = FALSE)
+```
+
+## C2. Per-Gene ANOVA — Sunflower Host Genes
+
+```{r pergene-anova-sunflower-host}
+expr_mat_sun <- assay(vst_sun_host)
+gene_meta_sun <- perm_meta_sun
+
+options(contrasts = c("contr.sum", "contr.poly"))
+
+cat("Running per-gene ANOVA for", nrow(expr_mat_sun), "sunflower host genes...\n")
+
+pergene_results_sun <- do.call(rbind, lapply(seq_len(nrow(expr_mat_sun)), function(i) {
+  df_gene <- data.frame(expr = expr_mat_sun[i, ], gene_meta_sun)
+  
+  fit <- tryCatch(
+    lm(expr ~ isolate + timepoint + block, data = df_gene),
+    error = function(e) NULL
+  )
+  if (is.null(fit)) {
+    return(data.frame(gene = rownames(expr_mat_sun)[i],
+                      F_isolate = NA, p_isolate = NA,
+                      F_timepoint = NA, p_timepoint = NA,
+                      F_block = NA, p_block = NA))
+  }
+  
+  av <- tryCatch(Anova(fit, type = "III"), error = function(e) NULL)
+  if (is.null(av)) {
+    return(data.frame(gene = rownames(expr_mat_sun)[i],
+                      F_isolate = NA, p_isolate = NA,
+                      F_timepoint = NA, p_timepoint = NA,
+                      F_block = NA, p_block = NA))
+  }
+  
+  data.frame(
+    gene        = rownames(expr_mat_sun)[i],
+    F_isolate   = av["isolate",   "F value"],
+    p_isolate   = av["isolate",   "Pr(>F)"],
+    F_timepoint = av["timepoint", "F value"],
+    p_timepoint = av["timepoint", "Pr(>F)"],
+    F_block     = av["block",     "F value"],
+    p_block     = av["block",     "Pr(>F)"]
+  )
+}))
+
+# FDR correction
+pergene_results_sun$padj_isolate   <- p.adjust(pergene_results_sun$p_isolate,   method = "BH")
+pergene_results_sun$padj_timepoint <- p.adjust(pergene_results_sun$p_timepoint, method = "BH")
+pergene_results_sun$padj_block     <- p.adjust(pergene_results_sun$p_block,     method = "BH")
+
+cat("\n══════ Per-Gene ANOVA Summary — Sunflower Host (padj < 0.05) ══════\n")
+cat(sprintf("  Isolate effect:   %d genes\n",
+            sum(pergene_results_sun$padj_isolate < 0.05, na.rm = TRUE)))
+cat(sprintf("  Timepoint effect: %d genes\n",
+            sum(pergene_results_sun$padj_timepoint < 0.05, na.rm = TRUE)))
+cat(sprintf("  Block effect:     %d genes\n",
+            sum(pergene_results_sun$padj_block < 0.05, na.rm = TRUE)))
+
+write.csv(pergene_results_sun,
+          "anova_results/pergene_ANOVA_sunflower_host_all.csv", row.names = FALSE)
+
+for (fac in c("isolate", "timepoint")) {
+  col_padj <- paste0("padj_", fac)
+  sig <- pergene_results_sun %>%
+    filter(.data[[col_padj]] < 0.05) %>%
+    arrange(.data[[col_padj]])
+  write.csv(sig,
+            sprintf("anova_results/pergene_ANOVA_sunflower_host_sig_%s.csv", fac),
+            row.names = FALSE)
+}
+```
+
+## C3. Pairwise Comparisons — Sunflower Host Genes
+
+```{r pairwise-sunflower-isolate}
+sig_iso_sun <- pergene_results_sun$gene[
+  which(pergene_results_sun$padj_isolate < 0.05)
+]
+
+cat(sprintf("Running isolate pairwise for %d significant sunflower host genes...\n",
+            length(sig_iso_sun)))
+
+if (length(sig_iso_sun) > 0) {
+  genes_to_test <- head(sig_iso_sun, 500)
+  
+  pw_list <- lapply(genes_to_test, function(g) {
+    df_gene <- data.frame(expr = expr_mat_sun[g, ], gene_meta_sun)
+    fit <- lm(expr ~ isolate + timepoint + block, data = df_gene)
+    emm <- emmeans(fit, pairwise ~ isolate, adjust = "tukey")
+    contr <- as.data.frame(summary(emm$contrasts))
+    contr$gene <- g
+    return(contr)
+  })
+  
+  pairwise_iso_sun <- do.call(rbind, pw_list)
+  write.csv(pairwise_iso_sun,
+            "anova_results/pairwise_isolate_sunflower_host.csv", row.names = FALSE)
+  cat(sprintf("  Saved %d comparisons for %d genes\n",
+              nrow(pairwise_iso_sun), length(genes_to_test)))
+}
+```
+
+```{r pairwise-sunflower-timepoint}
+sig_tp_sun <- pergene_results_sun$gene[
+  which(pergene_results_sun$padj_timepoint < 0.05)
+]
+
+cat(sprintf("Running timepoint pairwise for %d significant sunflower host genes...\n",
+            length(sig_tp_sun)))
+
+if (length(sig_tp_sun) > 0) {
+  genes_to_test <- head(sig_tp_sun, 500)
+  
+  pw_list <- lapply(genes_to_test, function(g) {
+    df_gene <- data.frame(expr = expr_mat_sun[g, ], gene_meta_sun)
+    fit <- lm(expr ~ isolate + timepoint + block, data = df_gene)
+    emm <- emmeans(fit, pairwise ~ timepoint, adjust = "tukey")
+    contr <- as.data.frame(summary(emm$contrasts))
+    contr$gene <- g
+    return(contr)
+  })
+  
+  pairwise_tp_sun <- do.call(rbind, pw_list)
+  write.csv(pairwise_tp_sun,
+            "anova_results/pairwise_timepoint_sunflower_host.csv", row.names = FALSE)
+  cat(sprintf("  Saved %d comparisons for %d genes\n",
+              nrow(pairwise_tp_sun), length(genes_to_test)))
+}
+```
+
+## C4. Summary Visualizations — Sunflower
+
+```{r viz-sunflower-host, fig.height=4}
+sig_counts_sun <- data.frame(
+  Factor = c("Isolate", "Timepoint", "Block"),
+  n_sig  = c(
+    sum(pergene_results_sun$padj_isolate   < 0.05, na.rm = TRUE),
+    sum(pergene_results_sun$padj_timepoint < 0.05, na.rm = TRUE),
+    sum(pergene_results_sun$padj_block     < 0.05, na.rm = TRUE)
+  )
+)
+sig_counts_sun$Factor <- factor(sig_counts_sun$Factor,
+                                 levels = c("Isolate","Timepoint","Block"))
+
+ggplot(sig_counts_sun, aes(x = Factor, y = n_sig, fill = Factor)) +
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = n_sig), vjust = -0.5, size = 5) +
+  scale_fill_manual(values = c("#377EB8","#FF6347","#999999")) +
+  labs(title = "Sunflower Host Genes: Significant per Factor (padj < 0.05)",
+       y = "Number of significant genes", x = "") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "none")
+```
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PART D: Combined Summary
+# ═══════════════════════════════════════════════════════════════════════════
+
+```{r combined-summary, fig.width=12, fig.height=6}
+cat(paste(rep("=", 80), collapse = ""), "\n")
+cat("COMPLETE ANOVA ANALYSIS SUMMARY\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+cat("PERMANOVA R² (proportion of variance explained):\n")
+cat("─────────────────────────────────────────────────\n")
+
+# Extract R2 from each PERMANOVA
+cat("\n  Pathogen genes (across both hosts):\n")
+for (i in 1:4) {
+  cat(sprintf("    %-35s R² = %.4f, p = %s\n",
+              pub_perm_pathogen$Source[i],
+              pub_perm_pathogen$R2[i],
+              ifelse(is.na(pub_perm_pathogen$p_value[i]), "NA",
+                     sprintf("%.4f", pub_perm_pathogen$p_value[i]))))
+}
+
+cat("\n  Soybean host genes:\n")
+for (i in 1:3) {
+  cat(sprintf("    %-35s R² = %.4f, p = %s\n",
+              pub_perm_soy$Source[i],
+              pub_perm_soy$R2[i],
+              ifelse(is.na(pub_perm_soy$p_value[i]), "NA",
+                     sprintf("%.4f", pub_perm_soy$p_value[i]))))
+}
+
+cat("\n  Sunflower host genes:\n")
+for (i in 1:3) {
+  cat(sprintf("    %-35s R² = %.4f, p = %s\n",
+              pub_perm_sun$Source[i],
+              pub_perm_sun$R2[i],
+              ifelse(is.na(pub_perm_sun$p_value[i]), "NA",
+                     sprintf("%.4f", pub_perm_sun$p_value[i]))))
+}
+
+cat("\n\nPER-GENE ANOVA (significant genes, padj < 0.05):\n")
+cat("─────────────────────────────────────────────────\n")
+summary_table <- data.frame(
+  Dataset   = c("Pathogen","Pathogen","Pathogen","Pathogen",
+                "Soy Host","Soy Host","Soy Host",
+                "Sun Host","Sun Host","Sun Host"),
+  Factor    = c("Host","Isolate","Timepoint","Block",
+                "Isolate","Timepoint","Block",
+                "Isolate","Timepoint","Block"),
+  n_sig     = c(
+    sum(pergene_results_pathogen$padj_host      < 0.05, na.rm = TRUE),
+    sum(pergene_results_pathogen$padj_isolate   < 0.05, na.rm = TRUE),
+    sum(pergene_results_pathogen$padj_timepoint < 0.05, na.rm = TRUE),
+    sum(pergene_results_pathogen$padj_block     < 0.05, na.rm = TRUE),
+    sum(pergene_results_soy$padj_isolate   < 0.05, na.rm = TRUE),
+    sum(pergene_results_soy$padj_timepoint < 0.05, na.rm = TRUE),
+    sum(pergene_results_soy$padj_block     < 0.05, na.rm = TRUE),
+    sum(pergene_results_sun$padj_isolate   < 0.05, na.rm = TRUE),
+    sum(pergene_results_sun$padj_timepoint < 0.05, na.rm = TRUE),
+    sum(pergene_results_sun$padj_block     < 0.05, na.rm = TRUE)
+  )
+)
+print(summary_table, row.names = FALSE)
+
+# ── Combined bar plot ──
+summary_table$Dataset <- factor(summary_table$Dataset,
+                                 levels = c("Pathogen","Soy Host","Sun Host"))
+
+ggplot(summary_table, aes(x = Factor, y = n_sig, fill = Dataset)) +
+  geom_col(position = position_dodge(width = 0.8), alpha = 0.85) +
+  geom_text(aes(label = n_sig),
+            position = position_dodge(width = 0.8),
+            vjust = -0.5, size = 3.5) +
+  scale_fill_manual(values = c("Pathogen" = "#2ca02c",
+                                "Soy Host" = "#ffcb21",
+                                "Sun Host" = "#5e3a04")) +
+  labs(title = "Significant Genes per Factor Across All Datasets",
+       subtitle = "Per-gene Type III ANOVA, BH-corrected (padj < 0.05)",
+       y = "Number of significant genes", x = "") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "top")
+```
+
+# Output File Summary
+
+```{r file-summary}
+cat("All output files in anova_results/:\n")
+cat("────────────────────────────────────\n\n")
+cat("PERMANOVA tables:\n")
+cat("  PERMANOVA_pathogen_genes.csv\n")
+cat("  PERMANOVA_soybean_host_genes.csv\n")
+cat("  PERMANOVA_sunflower_host_genes.csv\n")
+cat("\nPer-gene ANOVA (all genes):\n")
+cat("  pergene_ANOVA_pathogen_all.csv\n")
+cat("  pergene_ANOVA_soybean_host_all.csv\n")
+cat("  pergene_ANOVA_sunflower_host_all.csv\n")
+cat("\nPer-gene ANOVA (significant only):\n")
+cat("  pergene_ANOVA_pathogen_sig_host.csv\n")
+cat("  pergene_ANOVA_pathogen_sig_isolate.csv\n")
+cat("  pergene_ANOVA_pathogen_sig_timepoint.csv\n")
+cat("  pergene_ANOVA_soybean_host_sig_isolate.csv\n")
+cat("  pergene_ANOVA_soybean_host_sig_timepoint.csv\n")
+cat("  pergene_ANOVA_sunflower_host_sig_isolate.csv\n")
+cat("  pergene_ANOVA_sunflower_host_sig_timepoint.csv\n")
+cat("\nPairwise comparisons (Tukey HSD):\n")
+cat("  pairwise_host_pathogen.csv\n")
+cat("  pairwise_isolate_pathogen.csv\n")
+cat("  pairwise_timepoint_pathogen.csv\n")
+cat("  pairwise_isolate_soybean_host.csv\n")
+cat("  pairwise_timepoint_soybean_host.csv\n")
+cat("  pairwise_isolate_sunflower_host.csv\n")
+cat("  pairwise_timepoint_sunflower_host.csv\n")
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```

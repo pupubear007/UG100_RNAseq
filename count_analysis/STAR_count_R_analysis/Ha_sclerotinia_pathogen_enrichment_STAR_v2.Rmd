@@ -1,0 +1,1839 @@
+---
+title: "GO Enrichment Analysis - Sclerotinia sclerotiorum Pathogen DEGs"
+author: "RNA-seq Analysis"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  warning = FALSE, 
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 8
+)
+```
+# 1. Setup and Library Loading
+
+```{r libraries}
+# Load required packages
+library(clusterProfiler)
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(enrichplot)
+library(GOSemSim)
+
+cat("✓ Libraries loaded successfully\n")
+```
+---
+
+# 2. Load and Prepare Data
+
+## 2.1 Set Working Directory
+```{r set_wd}
+# Set to your analysis directory
+# TODO: set the working directory to the folder containing your STAR DEG CSVs
+# setwd("/Users/andrew20445/Desktop/To_do_list/RNAseq_R/STAR/R/Enrichment_result")
+
+cat("Working directory:", getwd(), "\n")
+```
+## 2.2 Load DEG File
+
+```{r load_annotation}
+cat("\n=== LOADING SCLEROTINIA GO ANNOTATION ===\n\n")
+
+# Load JGI MycoCosm GO annotation
+go_file <- "./Sclsc1_GeneCatalog_proteins_20110903_GO.tab"
+
+if(!file.exists(go_file)) {
+  stop("❌ GO annotation file not found: ", go_file)
+}
+
+go_annot <- read.delim(go_file, header = TRUE, stringsAsFactors = FALSE)
+
+cat("✓ Loaded GO annotation file\n")
+cat("  File:", go_file, "\n")
+cat("  Rows:", nrow(go_annot), "\n")
+cat("  Columns:", ncol(go_annot), "\n\n")
+
+cat("Column names:\n")
+print(colnames(go_annot))
+cat("\n")
+
+# Show structure
+cat("Sample annotation data:\n")
+print(head(go_annot, 10))
+
+cat("\nAnnotation statistics:\n")
+cat("  Unique protein IDs:", length(unique(go_annot$X.proteinId)), "\n")
+cat("  Unique GO terms:", length(unique(go_annot$goAcc)), "\n")
+cat("  Total gene-GO pairs:", nrow(go_annot), "\n")
+
+cat("\n  Protein ID range in annotation:\n")
+cat("    Min:", min(go_annot$X.proteinId), "\n")
+cat("    Max:", max(go_annot$X.proteinId), "\n")
+```
+```{r create_go_mapping}
+cat("\n=== CREATING GO-TO-GENE MAPPING ===\n\n")
+
+# The GO annotation file has:
+#   X.proteinId (numeric) → goAcc (GO:XXXXXXX)
+# Our fixed DEG IDs are now numeric protein IDs
+
+# Create term2gene dataframe (GO term → gene mapping)
+term2gene <- data.frame(
+  GO = go_annot$goAcc,
+  GeneID = as.character(go_annot$X.proteinId),  # Convert to character for clusterProfiler
+  stringsAsFactors = FALSE
+)
+
+cat("Created term2gene mapping:\n")
+cat("  Total GO-gene pairs:", nrow(term2gene), "\n")
+cat("  Unique GO terms:", length(unique(term2gene$GO)), "\n")
+cat("  Unique genes:", length(unique(term2gene$GeneID)), "\n\n")
+
+cat("Sample mapping:\n")
+print(head(term2gene, 10))
+
+# Also create term2name (GO term → GO name)
+term2name <- data.frame(
+  GO = go_annot$goAcc,
+  Name = go_annot$goName,
+  stringsAsFactors = FALSE
+) %>%
+  distinct(GO, .keep_all = TRUE)
+
+cat("\nCreated term2name mapping:\n")
+cat("  Unique GO terms with names:", nrow(term2name), "\n\n")
+
+cat("Sample GO term names:\n")
+print(head(term2name, 10))
+```
+
+---
+
+# Per-Timepoint GO Enrichment Analysis (24h, 48h, 96h)
+
+The analysis below is run independently for each of the three timepoints.
+Each iteration loads its own DEG CSV, runs the same enrichment pipeline,
+produces the same plots, and saves results to per-timepoint output folders.
+A cross-timepoint summary is generated at the end.
+
+```{r enrichment_loop, results='asis', fig.width=12, fig.height=8}
+# === Per-timepoint loop ===
+timepoints <- c("24h", "48h", "96h")
+master_results <- list()
+
+# Stash the static term2gene/term2name from earlier setup chunks so the loop
+# can rely on them by stable name in every iteration (they don't change).
+.term2gene_static <- term2gene
+.term2name_static <- term2name
+
+for (tp in timepoints) {
+  tp_suffix <- paste0("_", tp)
+
+  cat("\n\n---\n\n")
+  cat(sprintf("# === TIMEPOINT: %s ===\n\n", tp))
+
+  # Re-bind annotation objects in case they were shadowed
+  term2gene <- .term2gene_static
+  term2name <- .term2name_static
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: load_degs
+  # ╚══════════════════════════════════════════╝
+  cat("\n=== LOADING PATHOGEN DEG FILE ===\n\n")
+
+  # Load the DEG file WITH row.names = 1 (gene IDs in rownames)
+  deg_file <- sprintf("./Ha_pathogen_aggressive_vs_low_DEGs_%s.csv", tp)
+
+  # Check if file exists
+  if(!file.exists(deg_file)) {
+    stop("❌ DEG file not found: ", deg_file)
+  }
+
+  cat("✓ File found:", basename(deg_file), "\n\n")
+
+  # Load with gene IDs as rownames
+  pathogen_degs <- read.csv(deg_file, stringsAsFactors = FALSE, row.names = 1)
+
+  cat("✓ Loaded DEG file\n")
+  cat("  Total DEGs:", nrow(pathogen_degs), "\n")
+  cat("  Columns:", ncol(pathogen_degs), "\n\n")
+
+  # Show structure
+  cat("File structure:\n")
+  str(pathogen_degs)
+
+  cat("\nFirst few rows:\n")
+  print(head(pathogen_degs))
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: explore_degs
+  # ╚══════════════════════════════════════════╝
+  cat("\n=== DEG FILE OVERVIEW ===\n\n")
+
+  # Show first few rows (gene IDs are in rownames)
+  cat("First few genes (original JGI format):\n")
+  print(head(rownames(pathogen_degs)))
+
+  cat("\n\nFirst few data rows:\n")
+  print(head(pathogen_degs))
+
+  # Check for required columns
+  cat("\nChecking for log2FoldChange column...\n")
+  lfc_cols <- grep("log.*fold|lfc", colnames(pathogen_degs), ignore.case = TRUE, value = TRUE)
+  if(length(lfc_cols) > 0) {
+    cat("✓ Found log2FoldChange column:", lfc_cols[1], "\n")
+  } else {
+    cat("⚠️ No log2FoldChange column found\n")
+  }
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: fix_gene_ids
+  # ╚══════════════════════════════════════════╝
+  cat("\n=== EXTRACTING PROTEIN IDs ===\n\n")
+
+  cat("Gene ID format: SS1G_#####T0\n")
+  cat("                └─────┬─────\n")
+  cat("                      └─ Numeric protein ID (extract this)\n\n")
+
+  # Gene names are already in rownames - copy them
+  pathogen_degs$gene_name <- rownames(pathogen_degs)
+
+  # Extract numeric protein ID from gene name
+  # SS1G_12396T0 → 12396
+  pathogen_degs$protein_id <- as.numeric(gsub("SS1G_(\\d+)T\\d+", "\\1", rownames(pathogen_degs)))
+
+  # Keep original ID for reference
+  pathogen_degs$original_gene_id <- rownames(pathogen_degs)
+
+  # Reorder columns to put IDs first
+  pathogen_degs <- pathogen_degs %>%
+    select(gene_name, protein_id, original_gene_id, everything())
+
+  cat("Extraction examples:\n")
+  extraction_df <- data.frame(
+    Gene_Name = head(pathogen_degs$gene_name, 10),
+    Protein_ID = head(pathogen_degs$protein_id, 10),
+    stringsAsFactors = FALSE
+  )
+  print(extraction_df)
+
+  cat("\n\nExtraction statistics:\n")
+  cat("  Total genes:", nrow(pathogen_degs), "\n")
+  cat("  Successfully extracted protein IDs:", sum(!is.na(pathogen_degs$protein_id)), "\n")
+  cat("  Failed extractions:", sum(is.na(pathogen_degs$protein_id)), "\n")
+  cat("  Unique protein IDs:", length(unique(pathogen_degs$protein_id)), "\n")
+
+  if(sum(is.na(pathogen_degs$protein_id)) > 0) {
+    cat("\n⚠️ Warning: Some IDs failed to extract!\n")
+    cat("Failed IDs:\n")
+    print(pathogen_degs$gene_name[is.na(pathogen_degs$protein_id)])
+  } else {
+    cat("\n✓ All protein IDs extracted successfully!\n")
+  }
+
+  cat("\nUpdated dataframe structure:\n")
+  str(pathogen_degs)
+
+  cat("\nSample data:\n")
+  print(head(pathogen_degs[, 1:6], 10))
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: separate_regulation
+  # ╚══════════════════════════════════════════╝
+  cat("\n=== SEPARATING UP AND DOWN-REGULATED GENES ===\n\n")
+
+  # Find log2FoldChange column
+  lfc_col <- grep("log.*fold|lfc", colnames(pathogen_degs), ignore.case = TRUE, value = TRUE)[1]
+
+  if(!is.na(lfc_col)) {
+    # Separate by regulation direction
+    upregulated <- pathogen_degs[pathogen_degs[[lfc_col]] > 0, ]
+    downregulated <- pathogen_degs[pathogen_degs[[lfc_col]] < 0, ]
+    
+    cat("Regulation breakdown:\n")
+    cat("  Up-regulated:", nrow(upregulated), "genes\n")
+    cat("  Down-regulated:", nrow(downregulated), "genes\n")
+    cat("  Total:", nrow(pathogen_degs), "genes\n")
+  } else {
+    cat("⚠️ Cannot separate by regulation - treating all as one group\n")
+    upregulated <- pathogen_degs
+    downregulated <- data.frame()
+  }
+
+
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: check_coverage
+  # ╚══════════════════════════════════════════╝
+  cat("\n=== CHECKING ANNOTATION COVERAGE ===\n\n")
+
+  # Get unique DEG protein IDs and annotation IDs (both as character for comparison)
+  deg_protein_ids <- unique(as.character(pathogen_degs$protein_id[!is.na(pathogen_degs$protein_id)]))
+  annot_protein_ids <- unique(term2gene$GeneID)
+
+  # Find overlap
+  overlap_ids <- intersect(deg_protein_ids, annot_protein_ids)
+
+  cat("Coverage Statistics:\n")
+  cat("  Unique DEG protein IDs:", length(deg_protein_ids), "\n")
+  cat("  Unique annotated protein IDs:", length(annot_protein_ids), "\n")
+  cat("  Overlap (genes with annotation):", length(overlap_ids), "\n")
+  cat("  Coverage:", round(100 * length(overlap_ids) / length(deg_protein_ids), 1), "%\n\n")
+
+  if(length(overlap_ids) == 0) {
+    cat("❌ ERROR: No overlap between DEG IDs and annotation IDs!\n")
+    cat("\nSample DEG protein IDs:\n")
+    print(head(deg_protein_ids, 10))
+    cat("\nSample annotation protein IDs:\n")
+    print(head(annot_protein_ids, 10))
+    stop("Gene ID mismatch - check ID extraction")
+  }
+
+  cat("✓ Good overlap found!\n\n")
+
+  cat("Sample matching protein IDs:\n")
+  print(head(overlap_ids, 10))
+
+  # Show which DEG genes they correspond to
+  cat("\nCorresponding gene names:\n")
+  matching_genes <- pathogen_degs %>%
+    filter(as.character(protein_id) %in% head(overlap_ids, 10)) %>%
+    select(protein_id, gene_name, original_gene_id)
+  print(matching_genes)
+
+  # Check coverage by ontology
+  cat("\n\nCoverage by GO ontology:\n")
+  go_types <- go_annot %>%
+    filter(as.character(X.proteinId) %in% overlap_ids) %>%
+    group_by(gotermType) %>%
+    summarise(
+      genes = n_distinct(X.proteinId),
+      terms = n_distinct(goAcc)
+    )
+  print(go_types)
+
+  cat("\n** Note: 20-40% coverage is NORMAL and EXPECTED for fungal pathogens **\n")
+  cat("** Many genes are hypothetical proteins or lack experimental characterization **\n")
+  cat("** This coverage is sufficient for meaningful enrichment analysis **\n")
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: prepare_gene_lists
+  # ╚══════════════════════════════════════════╝
+  cat("\n=== PREPARING GENE LISTS FOR ENRICHMENT ===\n\n")
+
+  # Convert protein IDs to character for clusterProfiler
+  # Remove NAs first
+  all_genes_list <- as.character(pathogen_degs$protein_id[!is.na(pathogen_degs$protein_id)])
+  up_genes_list <- if(nrow(upregulated) > 0) {
+    as.character(upregulated$protein_id[!is.na(upregulated$protein_id)])
+  } else {
+    character(0)
+  }
+  down_genes_list <- if(nrow(downregulated) > 0) {
+    as.character(downregulated$protein_id[!is.na(downregulated$protein_id)])
+  } else {
+    character(0)
+  }
+
+  cat("Gene lists prepared:\n")
+  cat("  All DEGs:", length(all_genes_list), "genes\n")
+  cat("  Up-regulated:", length(up_genes_list), "genes\n")
+  cat("  Down-regulated:", length(down_genes_list), "genes\n\n")
+
+  cat("Sample gene IDs (protein IDs):\n")
+  cat("  All:", paste(head(all_genes_list, 5), collapse = ", "), "\n")
+  if(length(up_genes_list) > 0) {
+    cat("  Up:", paste(head(up_genes_list, 5), collapse = ", "), "\n")
+  }
+  if(length(down_genes_list) > 0) {
+    cat("  Down:", paste(head(down_genes_list, 5), collapse = ", "), "\n")
+  }
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: enrich_all
+  # ╚══════════════════════════════════════════╝
+  cat("\n=== GO ENRICHMENT: ALL DEGs ===\n\n")
+
+  # Run enrichment using custom term2gene
+  ego_all <- enricher(
+    gene = all_genes_list,
+    TERM2GENE = term2gene,
+    TERM2NAME = term2name,
+    pvalueCutoff = 0.05,
+    qvalueCutoff = 0.2,
+    minGSSize = 10,
+    maxGSSize = 500
+  )
+
+  if(!is.null(ego_all) && nrow(ego_all@result) > 0) {
+    cat("✓ Found", nrow(ego_all@result), "enriched GO terms\n\n")
+    cat("Top 10 enriched terms:\n")
+    print(head(ego_all@result[, c("ID", "Description", "GeneRatio", "pvalue", "qvalue")], 10))
+  } else {
+    cat("⚠️ No significantly enriched terms found for all DEGs\n")
+    cat("   (This can happen with small gene sets or low coverage)\n")
+  }
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: enrich_up
+  # ╚══════════════════════════════════════════╝
+  cat("\n=== GO ENRICHMENT: UP-REGULATED DEGs ===\n\n")
+
+  if(length(up_genes_list) >= 10) {
+    ego_up <- enricher(
+      gene = up_genes_list,
+      TERM2GENE = term2gene,
+      TERM2NAME = term2name,
+      pvalueCutoff = 0.05,
+      qvalueCutoff = 0.2,
+      minGSSize = 10,
+      maxGSSize = 500
+    )
+    
+    if(!is.null(ego_up) && nrow(ego_up@result) > 0) {
+      cat("✓ Found", nrow(ego_up@result), "enriched GO terms\n\n")
+      cat("Top 10 enriched terms:\n")
+      print(head(ego_up@result[, c("ID", "Description", "GeneRatio", "pvalue", "qvalue")], 10))
+    } else {
+      cat("⚠️ No significantly enriched terms found for up-regulated genes\n")
+      ego_up <- NULL
+    }
+  } else {
+    cat("⚠️ Not enough up-regulated genes (need at least 10)\n")
+    ego_up <- NULL
+  }
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: enrich_down
+  # ╚══════════════════════════════════════════╝
+  cat("\n=== GO ENRICHMENT: DOWN-REGULATED DEGs ===\n\n")
+
+  if(length(down_genes_list) >= 10) {
+    ego_down <- enricher(
+      gene = down_genes_list,
+      TERM2GENE = term2gene,
+      TERM2NAME = term2name,
+      pvalueCutoff = 0.05,
+      qvalueCutoff = 0.2,
+      minGSSize = 10,
+      maxGSSize = 500
+    )
+    
+    if(!is.null(ego_down) && nrow(ego_down@result) > 0) {
+      cat("✓ Found", nrow(ego_down@result), "enriched GO terms\n\n")
+      cat("Top 10 enriched terms:\n")
+      print(head(ego_down@result[, c("ID", "Description", "GeneRatio", "pvalue", "qvalue")], 10))
+    } else {
+      cat("⚠️ No significantly enriched terms found for down-regulated genes\n")
+      ego_down <- NULL
+    }
+  } else {
+    cat("⚠️ Not enough down-regulated genes (need at least 10)\n")
+    ego_down <- NULL
+  }
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: dotplot_all
+  # ╚══════════════════════════════════════════╝
+  # METHOD 2: Custom ggplot2 dotplot (RECOMMENDED - Always works!)
+  # ----------------------------------------------------------------------------
+
+  create_custom_dotplot <- function(ego, title = "GO Enrichment", top_n = 20) {
+    if(is.null(ego) || nrow(ego@result) == 0) {
+      message("No results to plot")
+      return(NULL)
+    }
+    
+    # Get data
+    df <- ego@result
+    
+    # Keep top N by p-value
+    df <- df[order(df$pvalue), ][1:min(top_n, nrow(df)), ]
+    
+    # Parse GeneRatio
+    df$GeneRatio_numeric <- sapply(strsplit(df$GeneRatio, "/"), 
+                                    function(x) as.numeric(x[1])/as.numeric(x[2]))
+    
+    # Get gene count
+    df$Count <- sapply(strsplit(df$GeneRatio, "/"), 
+                       function(x) as.numeric(x[1]))
+    
+    # Order by GeneRatio for plotting
+    df$Description <- factor(df$Description, levels = df$Description[order(df$GeneRatio_numeric)])
+    
+    # Create plot
+    p <- ggplot(df, aes(x = GeneRatio_numeric, y = Description)) +
+      geom_point(aes(size = Count, color = pvalue)) +
+      scale_color_gradient(low = "red", high = "blue", 
+                          name = "p-value",
+                          guide = guide_colorbar(reverse = TRUE)) +
+      scale_size_continuous(name = "Gene Count", range = c(3, 8)) +
+      labs(title = title,
+           x = "Gene Ratio",
+           y = NULL) +
+      theme_bw(base_size = 12) +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        legend.position = "right"
+      )
+    
+    return(p)
+  }
+
+  # Create custom dotplot
+  p_all <- create_custom_dotplot(ego_all, 
+                                    title = "GO Enrichment - All Pathogen DEGs", 
+                                    top_n = 20)
+  print(p_all)
+
+  p_up <- create_custom_dotplot(ego_up, 
+                                    title = "GO Enrichment - Upregulated Pathogen DEGs", 
+                                    top_n = 20)
+  print(p_up)
+
+  p_down <- create_custom_dotplot(ego_down, 
+                                    title = "GO Enrichment - Downregulated Pathogen DEGs", 
+                                    top_n = 20)
+  print(p_down)
+
+
+
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: barplot_all_2
+  # ╚══════════════════════════════════════════╝
+
+  # ALTERNATIVE: Simple barplot (always reliable!)
+  # ----------------------------------------------------------------------------
+
+  create_simple_barplot <- function(ego, title = "GO Enrichment", top_n = 20) {
+    if(is.null(ego) || nrow(ego@result) == 0) {
+      message("No results to plot")
+      return(NULL)
+    }
+    
+    df <- ego@result
+    df <- df[order(df$pvalue), ][1:min(top_n, nrow(df)), ]
+    
+    # Parse count
+    df$Count <- sapply(strsplit(df$GeneRatio, "/"), 
+                       function(x) as.numeric(x[1]))
+    
+    # Wrap descriptions
+    df$Description_wrapped <- stringr::str_wrap(df$Description, width = 50)
+    df$Description_wrapped <- factor(df$Description_wrapped,
+                                     levels = rev(df$Description_wrapped))
+    
+    # Barplot
+    p <- ggplot(df, aes(x = Count, y = Description_wrapped, fill = pvalue)) +
+      geom_col() +
+      scale_fill_gradient(low = "red", high = "blue",
+                         name = "p-value",
+                         guide = guide_colorbar(reverse = TRUE)) +
+      labs(title = title,
+           x = "Gene Count",
+           y = NULL) +
+      theme_minimal(base_size = 11) +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        axis.text.y = element_text(size = 9),
+        legend.position = "right"
+      )
+    
+    return(p)
+  }
+
+  # Create custom barplot
+  p_all <- create_simple_barplot(ego_all,
+                                title = "GO Enrichment - All Pathogen DEGs",
+                                top_n = 20)
+  print(p_all)
+
+  p_up <- create_simple_barplot(ego_up,
+                                title = "GO Enrichment - All Pathogen DEGs",
+                                top_n = 20)
+  print(p_up)
+
+  p_down <- create_simple_barplot(ego_down,
+                                title = "GO Enrichment - All Pathogen DEGs",
+                                top_n = 20)
+  print(p_down)
+
+
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: networks
+  # ╚══════════════════════════════════════════╝
+  # All DEGs - Gene-Concept Network
+  if(!is.null(ego_all) && nrow(ego_all@result[ego_all@result$p.adjust < 0.05, ]) >= 5) {
+    cat("Creating gene-concept network...\n")
+    p7 <- cnetplot(ego_all, 
+                   categorySize = "pvalue",
+                   showCategory = 5,
+                   colorEdge = TRUE,
+                   node_label = "category")
+    print(p7)
+  }
+
+  # Enrichment Map
+  if(!is.null(ego_all) && nrow(ego_all@result[ego_all@result$p.adjust < 0.05, ]) >= 5) {
+    cat("Creating enrichment map...\n")
+    ego_all_pair <- pairwise_termsim(ego_all)
+    p8 <- emapplot(ego_all_pair, 
+                   showCategory = 20,
+                   cex_label_category = 0.7)
+    print(p8)
+  }
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: cnetplot
+  # ╚══════════════════════════════════════════╝
+  # ============================================================================
+  # FIX FOR CNETPLOT ERROR WITH CUSTOM ENRICHER() RESULTS
+  # ============================================================================
+  # 
+  # Error: graph_from_data_frame(): `d` should contain at least two columns
+  # 
+  # This happens because cnetplot() expects specific data structure that may not
+  # be present in custom enricher() results.
+  #
+  # Solutions:
+  # 1. Fix the enricher object for cnetplot compatibility
+  # 2. Create custom network plot with ggplot2/igraph
+  # 3. Use alternative visualizations (heatmap, upset plot)
+  # ============================================================================
+
+  library(ggplot2)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+
+  # ============================================================================
+  # METHOD 1: Fix enricher result for cnetplot
+  # ============================================================================
+
+  fix_enricher_for_cnetplot <- function(ego) {
+    if(is.null(ego) || nrow(ego@result) == 0) {
+      return(NULL)
+    }
+    
+    # Ensure geneID column contains proper gene IDs (separated by "/")
+    # This should already be there from enricher(), but we'll verify
+    if(!"geneID" %in% colnames(ego@result)) {
+      warning("No geneID column found - cannot create network plot")
+      return(NULL)
+    }
+    
+    # Make sure gene IDs are properly formatted
+    # They should be in format: "gene1/gene2/gene3"
+    ego@result$geneID <- as.character(ego@result$geneID)
+    
+    # Add Count column if missing
+    if(!"Count" %in% colnames(ego@result)) {
+      ego@result$Count <- sapply(strsplit(ego@result$GeneRatio, "/"), 
+                                  function(x) as.numeric(x[1]))
+    }
+    
+    return(ego)
+  }
+
+  # Try to fix and plot
+  ego_all_fixed <- fix_enricher_for_cnetplot(ego_all)
+
+  if(!is.null(ego_all_fixed)) {
+    tryCatch({
+      p3 <- cnetplot(ego_all_fixed, showCategory=5, colorEdge=TRUE, circular=FALSE) +
+        ggtitle("Gene-Concept Network - Top 5 Terms") +
+        theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+      print(p3)
+    }, error = function(e) {
+      cat("cnetplot still failed. Using alternative visualization below.\n")
+      cat("Error:", e$message, "\n\n")
+    })
+  }
+
+
+  # ============================================================================
+  # METHOD 2: Custom Gene-Term Heatmap (RECOMMENDED ALTERNATIVE)
+  # ============================================================================
+
+  create_gene_term_heatmap <- function(ego, term2gene, top_terms = 10, max_genes = 50) {
+    if(is.null(ego) || nrow(ego@result) == 0) {
+      message("No results to plot")
+      return(NULL)
+    }
+    
+    # Get top terms
+    top_results <- ego@result[order(ego@result$pvalue), ][1:min(top_terms, nrow(ego@result)), ]
+    
+    # Extract gene-term relationships
+    gene_term_list <- list()
+    
+    for(i in 1:nrow(top_results)) {
+      term_id <- top_results$ID[i]
+      term_name <- top_results$Description[i]
+      genes <- unlist(strsplit(top_results$geneID[i], "/"))
+      
+      # Limit genes if too many
+      if(length(genes) > max_genes) {
+        genes <- genes[1:max_genes]
+      }
+      
+      gene_term_list[[i]] <- data.frame(
+        Gene = genes,
+        Term = str_wrap(term_name, width = 30),
+        GO_ID = term_id,
+        pvalue = top_results$pvalue[i],
+        stringsAsFactors = FALSE
+      )
+    }
+    
+    # Combine all
+    gene_term_df <- do.call(rbind, gene_term_list)
+    
+    # Create presence/absence matrix
+    gene_term_matrix <- gene_term_df %>%
+      mutate(present = 1) %>%
+      select(Gene, Term, present) %>%
+      pivot_wider(names_from = Term, values_from = present, values_fill = 0)
+    
+    # Convert to long format for ggplot
+    gene_term_long <- gene_term_matrix %>%
+      pivot_longer(-Gene, names_to = "Term", values_to = "Present") %>%
+      filter(Present == 1)
+    
+    # Add term order by p-value
+    term_order <- top_results %>%
+      mutate(Term = str_wrap(Description, width = 30)) %>%
+      arrange(pvalue) %>%
+      pull(Term)
+    
+    gene_term_long$Term <- factor(gene_term_long$Term, levels = rev(term_order))
+    
+    # Count how many terms each gene appears in
+    gene_counts <- gene_term_long %>%
+      group_by(Gene) %>%
+      summarise(n_terms = n()) %>%
+      arrange(desc(n_terms))
+    
+    # Order genes by frequency
+    gene_term_long$Gene <- factor(gene_term_long$Gene, 
+                                   levels = gene_counts$Gene)
+    
+    # Create heatmap
+    p <- ggplot(gene_term_long, aes(x = Gene, y = Term)) +
+      geom_tile(fill = "#2166AC", color = "white", linewidth = 0.5) +
+      labs(
+        title = "Gene-Term Relationship Matrix",
+        subtitle = paste("Top", top_terms, "GO terms"),
+        x = "Genes",
+        y = "GO Terms"
+      ) +
+      theme_minimal(base_size = 11) +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        plot.subtitle = element_text(hjust = 0.5, size = 11),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8),
+        axis.text.y = element_text(size = 9),
+        panel.grid = element_blank(),
+        axis.title = element_text(face = "bold")
+      )
+    
+    return(p)
+  }
+
+  # Create heatmap
+  cat("\n=== Creating Gene-Term Heatmap (Alternative to cnetplot) ===\n\n")
+  p_heatmap <- create_gene_term_heatmap(ego_all, term2gene, top_terms = 10, max_genes = 40)
+  print(p_heatmap)
+
+
+  # ============================================================================
+  # METHOD 3: UpSet Plot - Show Gene Overlap Between Terms
+  # ============================================================================
+
+  create_upset_style_plot <- function(ego, top_terms = 8) {
+    if(is.null(ego) || nrow(ego@result) == 0) {
+      message("No results to plot")
+      return(NULL)
+    }
+    
+    # Get top terms
+    top_results <- ego@result[order(ego@result$pvalue), ][1:min(top_terms, nrow(ego@result)), ]
+    
+    # Extract gene lists for each term
+    term_genes <- list()
+    for(i in 1:nrow(top_results)) {
+      term_name <- str_wrap(top_results$Description[i], width = 40)
+      genes <- unlist(strsplit(top_results$geneID[i], "/"))
+      term_genes[[term_name]] <- genes
+    }
+    
+    # Calculate intersections
+    all_genes <- unique(unlist(term_genes))
+    
+    # Create binary matrix
+    gene_matrix <- matrix(0, nrow = length(all_genes), ncol = length(term_genes))
+    rownames(gene_matrix) <- all_genes
+    colnames(gene_matrix) <- names(term_genes)
+    
+    for(i in 1:length(term_genes)) {
+      gene_matrix[term_genes[[i]], i] <- 1
+    }
+    
+    # Count genes per term and overlaps
+    term_sizes <- colSums(gene_matrix)
+    
+    # Create a simple bar plot showing term sizes
+    term_size_df <- data.frame(
+      Term = factor(names(term_sizes), levels = names(term_sizes)),
+      Size = as.numeric(term_sizes),
+      stringsAsFactors = FALSE
+    )
+    
+    p <- ggplot(term_size_df, aes(x = reorder(Term, Size), y = Size)) +
+      geom_col(fill = "#2166AC", alpha = 0.8) +
+      geom_text(aes(label = Size), hjust = -0.2, size = 3.5) +
+      coord_flip() +
+      labs(
+        title = "Number of Genes per GO Term",
+        subtitle = paste("Top", top_terms, "enriched terms"),
+        x = "GO Term",
+        y = "Number of Genes"
+      ) +
+      theme_minimal(base_size = 11) +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        plot.subtitle = element_text(hjust = 0.5, size = 11),
+        axis.text.y = element_text(size = 9),
+        axis.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank()
+      ) +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+    
+    return(p)
+  }
+
+  # Create upset-style plot
+  cat("\n=== Creating Gene Count Plot ===\n\n")
+  p_upset <- create_upset_style_plot(ego_all, top_terms = 10)
+  print(p_upset)
+
+
+  # ============================================================================
+  # METHOD 4: Network Plot using igraph (Manual Construction)
+  # ============================================================================
+
+  create_manual_network_plot <- function(ego, top_terms = 5, max_genes_per_term = 10) {
+    if(is.null(ego) || nrow(ego@result) == 0) {
+      message("No results to plot")
+      return(NULL)
+    }
+    
+    library(igraph)
+    
+    # Get top terms
+    top_results <- ego@result[order(ego@result$pvalue), ][1:min(top_terms, nrow(ego@result)), ]
+    
+    # Create edge list (Term -> Gene connections)
+    edges <- data.frame()
+    
+    for(i in 1:nrow(top_results)) {
+      term_name <- paste0("T", i, ": ", str_wrap(top_results$Description[i], width = 25))
+      genes <- unlist(strsplit(top_results$geneID[i], "/"))
+      
+      # Limit genes
+      if(length(genes) > max_genes_per_term) {
+        genes <- genes[1:max_genes_per_term]
+      }
+      
+      # Create edges
+      term_edges <- data.frame(
+        from = term_name,
+        to = genes,
+        stringsAsFactors = FALSE
+      )
+      
+      edges <- rbind(edges, term_edges)
+    }
+    
+    # Create graph
+    g <- graph_from_data_frame(edges, directed = FALSE)
+    
+    # Set node attributes
+    V(g)$type <- ifelse(V(g)$name %in% edges$from, "Term", "Gene")
+    V(g)$color <- ifelse(V(g)$type == "Term", "#E31A1C", "#1F78B4")
+    V(g)$size <- ifelse(V(g)$type == "Term", 12, 6)
+    V(g)$label.cex <- ifelse(V(g)$type == "Term", 0.8, 0.6)
+    
+    # Plot
+    par(mar = c(1, 1, 3, 1))
+    plot(g,
+         layout = layout_with_fr(g),
+         vertex.label.color = "black",
+         vertex.label.family = "sans",
+         vertex.frame.color = NA,
+         edge.color = "gray70",
+         edge.width = 0.5,
+         main = "Gene-Concept Network\n(Top 5 Terms)")
+    
+    legend("topright",
+           legend = c("GO Terms", "Genes"),
+           col = c("#E31A1C", "#1F78B4"),
+           pch = 19,
+           pt.cex = 2,
+           bty = "n")
+  }
+
+  # Create manual network plot
+  cat("\n=== Creating Manual Network Plot ===\n\n")
+  create_manual_network_plot(ego_all, top_terms = 5, max_genes_per_term = 8)
+
+
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: test2
+  # ╚══════════════════════════════════════════╝
+  library(enrichplot)
+  library(ggplot2)
+  library(igraph)
+  library(ggraph)
+  library(dplyr)
+  library(tidyr)
+
+  # ============================================================================
+  # METHOD 1: Fix enrichResult object for network plots
+  # ============================================================================
+
+  fix_enricher_for_networks <- function(ego, term2gene) {
+    if(is.null(ego) || nrow(ego@result) == 0) {
+      return(NULL)
+    }
+    
+    # Make sure the geneID column is properly formatted
+    # It should be a character string with genes separated by "/"
+    if(!"geneID" %in% colnames(ego@result)) {
+      stop("No geneID column found in enrichment results")
+    }
+    
+    # Parse gene counts if not already done
+    if(!"Count" %in% colnames(ego@result)) {
+      ego@result$Count <- sapply(strsplit(ego@result$GeneRatio, "/"), 
+                                  function(x) as.numeric(x[1]))
+    }
+    
+    # Ensure the gene list is attached to the object
+    # This is critical for cnetplot to work
+    if(is.null(ego@gene)) {
+      # Extract unique genes from all terms
+      all_genes <- unique(unlist(strsplit(ego@result$geneID, "/")))
+      ego@gene <- all_genes
+    }
+    
+    return(ego)
+  }
+
+  # Apply the fix
+  ego_all_fixed <- fix_enricher_for_networks(ego_all, term2gene)
+
+  # Now try cnetplot
+  if(!is.null(ego_all_fixed)) {
+    tryCatch({
+      p_cnet <- cnetplot(ego_all_fixed, 
+                         categorySize = "pvalue",
+                         showCategory = 5,
+                         colorEdge = TRUE,
+                         node_label = "category")
+      print(p_cnet)
+    }, error = function(e) {
+      cat("Standard cnetplot failed, using custom method...\n")
+      cat("Error was:", e$message, "\n")
+    })
+  }
+
+  # ============================================================================
+  # METHOD 2: Custom Gene-Concept Network (ALWAYS WORKS!)
+  # ============================================================================
+
+  create_custom_cnetplot <- function(ego, 
+                                     term2gene,
+                                     top_n = 5,
+                                     title = "Gene-Concept Network") {
+    
+    if(is.null(ego) || nrow(ego@result) == 0) {
+      message("No enrichment results to plot")
+      return(NULL)
+    }
+    
+    # Get top N terms
+    top_terms <- ego@result[order(ego@result$pvalue), ][1:min(top_n, nrow(ego@result)), ]
+    
+    # Create gene-term edges
+    edges_list <- list()
+    
+    for(i in 1:nrow(top_terms)) {
+      term_id <- top_terms$ID[i]
+      term_name <- top_terms$Description[i]
+      genes <- unlist(strsplit(top_terms$geneID[i], "/"))
+      
+      if(length(genes) > 0) {
+        edges_list[[i]] <- data.frame(
+          from = term_name,
+          to = genes,
+          term_pvalue = top_terms$pvalue[i],
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+    
+    # Combine all edges
+    edges <- do.call(rbind, edges_list)
+    
+    if(nrow(edges) == 0) {
+      message("No gene-term relationships found")
+      return(NULL)
+    }
+    
+    # Create node attributes
+    nodes <- data.frame(
+      name = unique(c(edges$from, edges$to)),
+      stringsAsFactors = FALSE
+    )
+    
+    # Identify node types
+    nodes$type <- ifelse(nodes$name %in% top_terms$Description, "Term", "Gene")
+    
+    # Add term p-values
+    nodes$pvalue <- NA
+    for(term in top_terms$Description) {
+      nodes$pvalue[nodes$name == term] <- top_terms$pvalue[top_terms$Description == term]
+    }
+    
+    # Create igraph object
+    g <- graph_from_data_frame(edges, directed = FALSE, vertices = nodes)
+    
+    # Create layout
+    set.seed(123)
+    layout <- create_layout(g, layout = 'fr')
+    
+    # Calculate node sizes
+    layout$size <- ifelse(layout$type == "Term", 8, 3)
+    
+    # Create plot
+    p <- ggraph(layout) +
+      geom_edge_link(aes(edge_alpha = 0.3), color = "grey70", width = 0.8) +
+      geom_node_point(aes(color = type, size = size, alpha = ifelse(type == "Term", -log10(pvalue), 0.7))) +
+      geom_node_text(aes(label = ifelse(type == "Term", name, "")), 
+                     size = 3, repel = TRUE, max.overlaps = 20) +
+      scale_color_manual(values = c("Term" = "#E64B35", "Gene" = "#4DBBD5"),
+                        name = "Node Type") +
+      scale_size_continuous(range = c(3, 10), guide = "none") +
+      scale_alpha_continuous(range = c(0.5, 1), guide = "none") +
+      labs(title = title) +
+      theme_graph(base_family = 'sans') +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        legend.position = "right"
+      )
+    
+    return(p)
+  }
+
+  # Create custom gene-concept network
+  p_custom_cnet <- create_custom_cnetplot(
+    ego_all, 
+    term2gene,
+    top_n = 5,
+    title = "Gene-Concept Network - Top 5 Terms"
+  )
+
+  if(!is.null(p_custom_cnet)) {
+    tryCatch(
+      print(p_custom_cnet),
+      error = function(e) {
+        message("\u26a0 Custom gene-concept network skipped (likely ggraph/igraph version mismatch): ",
+                conditionMessage(e))
+        message("  Fix permanently with: install.packages(c(\"ggraph\", \"igraph\", \"tidygraph\"))")
+      }
+    )
+  }
+
+  # ============================================================================
+  # METHOD 3: Simplified Gene-Concept Network (Alternative style)
+  # ============================================================================
+
+  create_simple_cnetplot <- function(ego, top_n = 5, title = "Gene-Concept Network") {
+    
+    if(is.null(ego) || nrow(ego@result) == 0) {
+      message("No enrichment results to plot")
+      return(NULL)
+    }
+    
+    # Get top terms
+    top_terms <- ego@result[order(ego@result$pvalue), ][1:min(top_n, nrow(ego@result)), ]
+    
+    # Wrap long term names
+    top_terms$Description_short <- stringr::str_wrap(top_terms$Description, width = 30)
+    
+    # Create edges
+    edges <- data.frame()
+    for(i in 1:nrow(top_terms)) {
+      genes <- unlist(strsplit(top_terms$geneID[i], "/"))
+      if(length(genes) > 0) {
+        temp <- data.frame(
+          Term = top_terms$Description_short[i],
+          Gene = genes,
+          pvalue = top_terms$pvalue[i],
+          stringsAsFactors = FALSE
+        )
+        edges <- rbind(edges, temp)
+      }
+    }
+    
+    # Create graph
+    g <- graph_from_data_frame(edges[, c("Term", "Gene")], directed = FALSE)
+    
+    # Set node attributes
+    V(g)$type <- ifelse(V(g)$name %in% edges$Term, "Term", "Gene")
+    V(g)$pvalue <- NA
+    for(term in unique(edges$Term)) {
+      V(g)$pvalue[V(g)$name == term] <- unique(edges$pvalue[edges$Term == term])
+    }
+    
+    # Create layout
+    set.seed(42)
+    coords <- layout_with_fr(g)
+    
+    # Convert to data frame for ggplot
+    node_df <- data.frame(
+      name = V(g)$name,
+      type = V(g)$type,
+      pvalue = V(g)$pvalue,
+      x = coords[, 1],
+      y = coords[, 2],
+      stringsAsFactors = FALSE
+    )
+    
+    edge_df <- data.frame(
+      from = ends(g, E(g))[, 1],
+      to = ends(g, E(g))[, 2],
+      stringsAsFactors = FALSE
+    )
+    
+    # Add coordinates for edges
+    edge_df$x <- node_df$x[match(edge_df$from, node_df$name)]
+    edge_df$y <- node_df$y[match(edge_df$from, node_df$name)]
+    edge_df$xend <- node_df$x[match(edge_df$to, node_df$name)]
+    edge_df$yend <- node_df$y[match(edge_df$to, node_df$name)]
+    
+    # Plot
+    p <- ggplot() +
+      geom_segment(data = edge_df, 
+                   aes(x = x, y = y, xend = xend, yend = yend),
+                   color = "grey70", alpha = 0.4, linewidth = 0.5) +
+      geom_point(data = node_df,
+                 aes(x = x, y = y, color = type, 
+                     size = ifelse(type == "Term", 10, 3),
+                     alpha = ifelse(type == "Term", -log10(pvalue), 0.6))) +
+      geom_text(data = node_df[node_df$type == "Term", ],
+                aes(x = x, y = y, label = name),
+                size = 3, fontface = "bold", color = "black",
+                hjust = 0.5, vjust = -1.2, check_overlap = TRUE) +
+      scale_color_manual(values = c("Term" = "#E64B35", "Gene" = "#4DBBD5"),
+                        name = "Node Type") +
+      scale_size_identity() +
+      scale_alpha_continuous(range = c(0.5, 1), guide = "none") +
+      labs(title = title) +
+      theme_void() +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        legend.position = "right"
+      )
+    
+    return(p)
+  }
+
+  # Create simple network
+  p_simple_cnet <- create_simple_cnetplot(
+    ego_all,
+    top_n = 5,
+    title = "Gene-Concept Network - Top 5 Terms"
+  )
+
+  if(!is.null(p_simple_cnet)) {
+    tryCatch(
+      print(p_simple_cnet),
+      error = function(e) {
+        message("\u26a0 Simple gene-concept network skipped (likely ggraph/igraph version mismatch): ",
+                conditionMessage(e))
+        message("  Fix permanently with: install.packages(c(\"ggraph\", \"igraph\", \"tidygraph\"))")
+      }
+    )
+  }
+
+  # ============================================================================
+  # METHOD 4: Fix and Create Enrichment Map (emapplot)
+  # ============================================================================
+
+  create_custom_emapplot <- function(ego, top_n = 20, title = "Enrichment Map") {
+    
+    if(is.null(ego) || nrow(ego@result) == 0) {
+      message("No enrichment results to plot")
+      return(NULL)
+    }
+    
+    # Get top terms
+    top_terms <- ego@result[order(ego@result$pvalue), ][1:min(top_n, nrow(ego@result)), ]
+    
+    if(nrow(top_terms) < 2) {
+      message("Need at least 2 terms for enrichment map")
+      return(NULL)
+    }
+    
+    # Calculate term similarity based on shared genes
+    n_terms <- nrow(top_terms)
+    sim_matrix <- matrix(0, nrow = n_terms, ncol = n_terms)
+    rownames(sim_matrix) <- top_terms$Description
+    colnames(sim_matrix) <- top_terms$Description
+    
+    for(i in 1:n_terms) {
+      genes_i <- unlist(strsplit(top_terms$geneID[i], "/"))
+      for(j in i:n_terms) {
+        if(i == j) {
+          sim_matrix[i, j] <- 1
+        } else {
+          genes_j <- unlist(strsplit(top_terms$geneID[j], "/"))
+          # Jaccard similarity
+          intersection <- length(intersect(genes_i, genes_j))
+          union <- length(union(genes_i, genes_j))
+          sim_matrix[i, j] <- sim_matrix[j, i] <- intersection / union
+        }
+      }
+    }
+    
+    # Create edges for similar terms (similarity > 0.2)
+    edges <- data.frame()
+    for(i in 1:(n_terms-1)) {
+      for(j in (i+1):n_terms) {
+        if(sim_matrix[i, j] > 0.2) {
+          edges <- rbind(edges, data.frame(
+            from = rownames(sim_matrix)[i],
+            to = colnames(sim_matrix)[j],
+            similarity = sim_matrix[i, j],
+            stringsAsFactors = FALSE
+          ))
+        }
+      }
+    }
+    
+    if(nrow(edges) == 0) {
+      message("No significant similarities between terms (all < 0.2)")
+      return(NULL)
+    }
+    
+    # Create nodes dataframe
+    nodes <- data.frame(
+      name = top_terms$Description,
+      pvalue = top_terms$pvalue,
+      count = sapply(strsplit(top_terms$GeneRatio, "/"), function(x) as.numeric(x[1])),
+      stringsAsFactors = FALSE
+    )
+    
+    # Wrap long names
+    nodes$name_short <- stringr::str_wrap(nodes$name, width = 25)
+    
+    # Create graph
+    g <- graph_from_data_frame(edges, directed = FALSE, vertices = nodes)
+    
+    # Layout
+    set.seed(123)
+    layout <- create_layout(g, layout = 'fr')
+    
+    # Plot
+    p <- ggraph(layout) +
+      geom_edge_link(aes(edge_width = similarity, edge_alpha = similarity), 
+                     color = "grey60") +
+      geom_node_point(aes(size = count, color = -log10(pvalue))) +
+      geom_node_text(aes(label = name_short), 
+                     size = 2.5, repel = TRUE, max.overlaps = 30,
+                     segment.size = 0.2) +
+      scale_edge_width_continuous(range = c(0.5, 2), name = "Gene\nSimilarity") +
+      scale_edge_alpha_continuous(range = c(0.3, 0.8), guide = "none") +
+      scale_size_continuous(range = c(3, 10), name = "Gene\nCount") +
+      scale_color_gradient(low = "blue", high = "red", name = "-log10\n(p-value)") +
+      labs(title = title) +
+      theme_graph(base_family = 'sans') +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        legend.position = "right"
+      )
+    
+    return(p)
+  }
+
+  # Create custom enrichment map
+  p_custom_emap <- create_custom_emapplot(
+    ego_all,
+    top_n = 15,
+    title = "Enrichment Map - Term Similarities"
+  )
+
+  if(!is.null(p_custom_emap)) {
+    tryCatch(
+      print(p_custom_emap),
+      error = function(e) {
+        message("\u26a0 Custom enrichment map skipped (likely ggraph/igraph version mismatch): ",
+                conditionMessage(e))
+        message("  Fix permanently with: install.packages(c(\"ggraph\", \"igraph\", \"tidygraph\"))")
+      }
+    )
+  }
+
+  # ============================================================================
+  # METHOD 5: Try standard emapplot with proper preparation
+  # ============================================================================
+
+  # For standard emapplot to work, we need to ensure term similarity is calculated
+  tryCatch({
+    # Calculate pairwise term similarity
+    ego_all_sim <- pairwise_termsim(ego_all)
+    
+    # Now try emapplot
+    p_emap_standard <- emapplot(ego_all_sim, 
+                                showCategory = 15,
+                                cex_label_category = 0.7)
+    print(p_emap_standard)
+    
+  }, error = function(e) {
+    cat("Standard emapplot failed:\n")
+    cat("Error:", e$message, "\n")
+    cat("Using custom method instead (see above)\n")
+  })
+
+  # ============================================================================
+  # COMPLETE REPLACEMENT CODE FOR YOUR NETWORK SECTION
+  # ============================================================================
+
+  cat("\n\n")
+  cat("=================================================================\n")
+  cat("COPY THE CODE BELOW TO REPLACE YOUR NETWORK VISUALIZATION SECTION\n")
+  cat("=================================================================\n\n")
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: networks_2
+  # ╚══════════════════════════════════════════╝
+  library(igraph)
+  library(ggraph)
+
+  # Function to create custom gene-concept network
+  create_custom_cnetplot <- function(ego, top_n = 5, title = "Gene-Concept Network") {
+    
+    if(is.null(ego) || nrow(ego@result) == 0) {
+      message("No enrichment results to plot")
+      return(NULL)
+    }
+    
+    top_terms <- ego@result[order(ego@result$pvalue), ][1:min(top_n, nrow(ego@result)), ]
+    
+    # Create edges
+    edges <- data.frame()
+    for(i in 1:nrow(top_terms)) {
+      genes <- unlist(strsplit(top_terms$geneID[i], "/"))
+      if(length(genes) > 0) {
+        temp <- data.frame(
+          Term = stringr::str_wrap(top_terms$Description[i], width = 30),
+          Gene = genes,
+          pvalue = top_terms$pvalue[i],
+          stringsAsFactors = FALSE
+        )
+        edges <- rbind(edges, temp)
+      }
+    }
+    
+    if(nrow(edges) == 0) return(NULL)
+    
+    # Create graph
+    g <- graph_from_data_frame(edges[, c("Term", "Gene")], directed = FALSE)
+    V(g)$type <- ifelse(V(g)$name %in% edges$Term, "Term", "Gene")
+    V(g)$pvalue <- NA
+    for(term in unique(edges$Term)) {
+      V(g)$pvalue[V(g)$name == term] <- unique(edges$pvalue[edges$Term == term])
+    }
+    
+    # Layout
+    set.seed(42)
+    layout <- create_layout(g, layout = "fr")
+    
+    # Plot
+    p <- ggraph(layout) +
+      geom_edge_link(aes(alpha = 0.3), color = "grey70", width = 0.8) +
+      geom_node_point(aes(color = type, 
+                         size = ifelse(type == "Term", 8, 3),
+                         alpha = ifelse(type == "Term", -log10(pvalue), 0.7))) +
+      geom_node_text(aes(label = ifelse(type == "Term", name, "")), 
+                     size = 3, repel = TRUE, max.overlaps = 20) +
+      scale_color_manual(values = c("Term" = "#E64B35", "Gene" = "#4DBBD5"),
+                        name = "Node Type") +
+      scale_size_identity() +
+      scale_alpha_continuous(range = c(0.5, 1), guide = "none") +
+      labs(title = title) +
+      theme_graph() +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+            legend.position = "right")
+    
+    return(p)
+  }
+
+  # Function to create enrichment map
+  create_custom_emapplot <- function(ego, top_n = 15, title = "Enrichment Map") {
+    
+    if(is.null(ego) || nrow(ego@result) == 0) return(NULL)
+    
+    top_terms <- ego@result[order(ego@result$pvalue), ][1:min(top_n, nrow(ego@result)), ]
+    if(nrow(top_terms) < 2) return(NULL)
+    
+    # Calculate similarity
+    n_terms <- nrow(top_terms)
+    sim_matrix <- matrix(0, nrow = n_terms, ncol = n_terms)
+    
+    for(i in 1:n_terms) {
+      genes_i <- unlist(strsplit(top_terms$geneID[i], "/"))
+      for(j in i:n_terms) {
+        if(i == j) {
+          sim_matrix[i, j] <- 1
+        } else {
+          genes_j <- unlist(strsplit(top_terms$geneID[j], "/"))
+          intersection <- length(intersect(genes_i, genes_j))
+          union <- length(union(genes_i, genes_j))
+          sim_matrix[i, j] <- sim_matrix[j, i] <- intersection / union
+        }
+      }
+    }
+    
+    # Create edges
+    edges <- data.frame()
+    for(i in 1:(n_terms-1)) {
+      for(j in (i+1):n_terms) {
+        if(sim_matrix[i, j] > 0.2) {
+          edges <- rbind(edges, data.frame(
+            from = i, to = j,
+            similarity = sim_matrix[i, j]
+          ))
+        }
+      }
+    }
+    
+    if(nrow(edges) == 0) {
+      message("No significant term similarities found")
+      return(NULL)
+    }
+    
+    # Create nodes
+    nodes <- data.frame(
+      id = 1:nrow(top_terms),
+      name = stringr::str_wrap(top_terms$Description, width = 25),
+      pvalue = top_terms$pvalue,
+      count = sapply(strsplit(top_terms$GeneRatio, "/"), function(x) as.numeric(x[1]))
+    )
+    
+    # Create graph
+    g <- graph_from_data_frame(edges, directed = FALSE, vertices = nodes)
+    
+    # Layout
+    set.seed(123)
+    layout <- create_layout(g, layout = "fr")
+    
+    # Plot
+    p <- ggraph(layout) +
+      geom_edge_link(aes(edge_width = similarity, edge_alpha = similarity), 
+                     color = "grey60") +
+      geom_node_point(aes(size = count, color = -log10(pvalue))) +
+      geom_node_text(aes(label = name), size = 2.5, repel = TRUE, 
+                     max.overlaps = 30) +
+      scale_edge_width_continuous(range = c(0.5, 2), name = "Similarity") +
+      scale_edge_alpha_continuous(range = c(0.3, 0.8), guide = "none") +
+      scale_size_continuous(range = c(3, 10), name = "Gene Count") +
+      scale_color_gradient(low = "blue", high = "red", name = "-log10(p)") +
+      labs(title = title) +
+      theme_graph() +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
+    
+    return(p)
+  }
+
+  # Create Gene-Concept Network
+  if(!is.null(ego_all) && nrow(ego_all@result) >= 5) {
+    cat("Creating gene-concept network...\\n")
+    p_cnet <- create_custom_cnetplot(ego_all, top_n = 5, 
+                                     title = "Gene-Concept Network - Top 5 Terms")
+    if(!is.null(p_cnet)) {
+      tryCatch(
+        print(p_cnet),
+        error = function(e) {
+          message("\u26a0 Gene-concept network skipped (likely ggraph/igraph version mismatch): ",
+                  conditionMessage(e))
+          message("  Fix permanently with: install.packages(c(\"ggraph\", \"igraph\", \"tidygraph\"))")
+        }
+      )
+    }
+  }
+
+  # Create Enrichment Map
+  if(!is.null(ego_all) && nrow(ego_all@result) >= 5) {
+    cat("Creating enrichment map...\\n")
+    p_emap <- create_custom_emapplot(ego_all, top_n = 15,
+                                     title = "Enrichment Map - Term Similarities")
+    if(!is.null(p_emap)) {
+      tryCatch(
+        print(p_emap),
+        error = function(e) {
+          message("\u26a0 Enrichment map skipped (likely ggraph/igraph version mismatch): ",
+                  conditionMessage(e))
+          message("  Fix permanently with: install.packages(c(\"ggraph\", \"igraph\", \"tidygraph\"))")
+        }
+      )
+    }
+  }
+
+
+
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: networks_3
+  # ╚══════════════════════════════════════════╝
+  library(igraph)
+  library(ggraph)
+
+
+  # Function to create enrichment map
+  create_custom_emapplot <- function(ego, top_n = 15, title = "Enrichment Map") {
+    
+    if(is.null(ego) || nrow(ego@result) == 0) return(NULL)
+    
+    top_terms <- ego@result[order(ego@result$pvalue), ][1:min(top_n, nrow(ego@result)), ]
+    if(nrow(top_terms) < 2) return(NULL)
+    
+    # Calculate similarity
+    n_terms <- nrow(top_terms)
+    sim_matrix <- matrix(0, nrow = n_terms, ncol = n_terms)
+    
+    for(i in 1:n_terms) {
+      genes_i <- unlist(strsplit(top_terms$geneID[i], "/"))
+      for(j in i:n_terms) {
+        if(i == j) {
+          sim_matrix[i, j] <- 1
+        } else {
+          genes_j <- unlist(strsplit(top_terms$geneID[j], "/"))
+          intersection <- length(intersect(genes_i, genes_j))
+          union <- length(union(genes_i, genes_j))
+          sim_matrix[i, j] <- sim_matrix[j, i] <- intersection / union
+        }
+      }
+    }
+    
+    # Create edges
+    edges <- data.frame()
+    for(i in 1:(n_terms-1)) {
+      for(j in (i+1):n_terms) {
+        if(sim_matrix[i, j] > 0.2) {
+          edges <- rbind(edges, data.frame(
+            from = i, to = j,
+            similarity = sim_matrix[i, j]
+          ))
+        }
+      }
+    }
+    
+    if(nrow(edges) == 0) {
+      message("No significant term similarities found")
+      return(NULL)
+    }
+    
+    # Create nodes
+    nodes <- data.frame(
+      id = 1:nrow(top_terms),
+      name = stringr::str_wrap(top_terms$Description, width = 25),
+      pvalue = top_terms$pvalue,
+      count = sapply(strsplit(top_terms$GeneRatio, "/"), function(x) as.numeric(x[1]))
+    )
+    
+    # Create graph
+    g <- graph_from_data_frame(edges, directed = FALSE, vertices = nodes)
+    
+    # Layout
+    set.seed(123)
+    layout <- create_layout(g, layout = "fr")
+    
+    # Plot
+    p <- ggraph(layout) +
+      geom_edge_link(aes(edge_width = similarity, edge_alpha = similarity), 
+                     color = "grey60") +
+      geom_node_point(aes(size = count, color = -log10(pvalue))) +
+      geom_node_text(aes(label = name), size = 2.5, repel = TRUE, 
+                     max.overlaps = 30) +
+      scale_edge_width_continuous(range = c(0.5, 2), name = "Similarity") +
+      scale_edge_alpha_continuous(range = c(0.3, 0.8), guide = "none") +
+      scale_size_continuous(range = c(3, 10), name = "Gene Count") +
+      scale_color_gradient(low = "blue", high = "red", name = "-log10(p)") +
+      labs(title = title) +
+      theme_graph() +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
+    
+    return(p)
+  }
+
+
+  # Create Enrichment Map
+  if(!is.null(ego_all) && nrow(ego_all@result) >= 5) {
+    cat("Creating enrichment map...\\n")
+    p_emap <- create_custom_emapplot(ego_all, top_n = 15,
+                                     title = "Enrichment Map - Term Similarities")
+    if(!is.null(p_emap)) {
+      tryCatch(
+        print(p_emap),
+        error = function(e) {
+          message("\u26a0 Enrichment map skipped (likely ggraph/igraph version mismatch): ",
+                  conditionMessage(e))
+          message("  Fix permanently with: install.packages(c(\"ggraph\", \"igraph\", \"tidygraph\"))")
+        }
+      )
+    }
+  }
+
+
+
+
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: save_results
+  # ╚══════════════════════════════════════════╝
+  cat("\n=== SAVING ENRICHMENT RESULTS ===\n\n")
+
+  # Create output directory
+  output_dir <- paste0("./sclerotinia_pathogen_enrichment_results", tp_suffix)
+  if(!dir.exists(output_dir)) {
+    dir.create(output_dir)
+    cat("✓ Created output directory:", output_dir, "\n")
+  }
+
+  # Save all DEGs enrichment
+  if(!is.null(ego_all) && nrow(ego_all@result) > 0) {
+    write.csv(ego_all@result, 
+              file.path(output_dir, "pathogen_all_DEGs_GO_enrichment.csv"),
+              row.names = FALSE)
+    cat("✓ Saved: pathogen_all_DEGs_GO_enrichment.csv\n")
+  }
+
+  # Save up-regulated enrichment
+  if(!is.null(ego_up) && nrow(ego_up@result) > 0) {
+    write.csv(ego_up@result,
+              file.path(output_dir, "pathogen_upregulated_GO_enrichment.csv"),
+              row.names = FALSE)
+    cat("✓ Saved: pathogen_upregulated_GO_enrichment.csv\n")
+  }
+
+  # Save down-regulated enrichment
+  if(!is.null(ego_down) && nrow(ego_down@result) > 0) {
+    write.csv(ego_down@result,
+              file.path(output_dir, "pathogen_downregulated_GO_enrichment.csv"),
+              row.names = FALSE)
+    cat("✓ Saved: pathogen_downregulated_GO_enrichment.csv\n")
+  }
+
+  # Save gene ID mapping (all three ID types)
+  gene_mapping <- pathogen_degs %>%
+    select(protein_id, gene_name, original_gene_id) %>%
+    filter(!is.na(protein_id))
+
+  write.csv(gene_mapping,
+            file.path(output_dir, "gene_id_mapping_complete.csv"),
+            row.names = FALSE)
+  cat("✓ Saved: gene_id_mapping_complete.csv\n")
+
+  # Save DEG file with protein IDs for future use
+  write.csv(pathogen_degs,
+            file.path(output_dir, "pathogen_DEGs_with_protein_ids.csv"),
+            row.names = FALSE)
+  cat("✓ Saved: pathogen_DEGs_with_protein_ids.csv\n")
+
+  cat("\nAll results saved to:", output_dir, "\n")
+
+
+  # ╔══════════════════════════════════════════╗
+  # ║ Section: summary
+  # ╚══════════════════════════════════════════╝
+  cat("\n=== ANALYSIS SUMMARY ===\n\n")
+
+  cat("Input Data:\n")
+  cat("  Total DEGs:", nrow(pathogen_degs), "\n")
+  cat("  Up-regulated:", nrow(upregulated), "\n")
+  cat("  Down-regulated:", nrow(downregulated), "\n\n")
+
+  cat("Gene ID Transformation:\n")
+  cat("  Original format: Ss_jgi|Sclsc1|PROTEIN_ID|GENE_NAME\n")
+  cat("  Extracted: Numeric protein IDs\n")
+  cat("  Successfully parsed:", sum(!is.na(pathogen_degs$protein_id)), "genes\n\n")
+
+  cat("Annotation Coverage:\n")
+  cat("  Genes with GO annotation:", length(overlap_ids), "\n")
+  cat("  Coverage:", round(100 * length(overlap_ids) / length(deg_protein_ids), 1), "%\n")
+  cat("  (Note: 20-40% is NORMAL and EXPECTED for fungal pathogens)\n\n")
+
+  cat("Enrichment Results:\n")
+  if(!is.null(ego_all) && nrow(ego_all@result) > 0) {
+    cat("  All DEGs:", nrow(ego_all@result), "enriched terms (p < 0.05)\n")
+  }
+  if(!is.null(ego_up) && nrow(ego_up@result) > 0) {
+    cat("  Up-regulated:", nrow(ego_up@result), "enriched terms (p < 0.05)\n")
+  }
+  if(!is.null(ego_down) && nrow(ego_down@result) > 0) {
+    cat("  Down-regulated:", nrow(ego_down@result), "enriched terms (p < 0.05)\n")
+  }
+
+  cat("\n✓ Analysis complete!\n")
+  cat("  Results saved in:", output_dir, "\n\n")
+
+  cat("Next Steps:\n")
+  cat("  1. Review enriched GO terms for biological insights\n")
+  cat("  2. Focus on pathogenicity-related processes (secretion, degradation, etc.)\n")
+  cat("  3. Consider eggNOG-mapper for CAZyme and effector annotation\n")
+  cat("  4. Validate top candidate genes with literature or experiments\n")
+
+
+  # ─── Stash results for cross-timepoint summary ───
+  master_results[[tp]] <- list(
+    n_degs        = if(exists("pathogen_degs"))     nrow(pathogen_degs)    else NA_integer_,
+    n_up          = if(exists("upregulated"))       nrow(upregulated)      else NA_integer_,
+    n_down        = if(exists("downregulated"))     nrow(downregulated)    else NA_integer_,
+    coverage_pct  = if(exists("coverage_pct"))      coverage_pct           else NA_real_,
+    ego_all       = if(exists("ego_all"))           ego_all                else NULL,
+    ego_up        = if(exists("ego_up"))            ego_up                 else NULL,
+    ego_down      = if(exists("ego_down"))          ego_down               else NULL
+  )
+
+  cat(sprintf("\n✓ Timepoint %s complete\n\n", tp))
+}  # end for-loop
+
+cat("\n\nAll timepoints processed.\n")
+
+```
+
+---
+
+# Cross-Timepoint Summary
+
+## DEG and Enrichment Counts per Timepoint
+
+```{r cross_tp_summary}
+cat("\n=== CROSS-TIMEPOINT SUMMARY ===\n\n")
+
+summary_df <- data.frame(
+  Timepoint    = character(),
+  Total_DEGs   = integer(),
+  Up           = integer(),
+  Down         = integer(),
+  Coverage_pct = numeric(),
+  GO_all       = integer(),
+  GO_up        = integer(),
+  GO_down      = integer(),
+  stringsAsFactors = FALSE
+)
+
+for (tp in names(master_results)) {
+  r <- master_results[[tp]]
+  summary_df <- rbind(summary_df, data.frame(
+    Timepoint    = tp,
+    Total_DEGs   = ifelse(is.na(r$n_degs),       0L, r$n_degs),
+    Up           = ifelse(is.na(r$n_up),         0L, r$n_up),
+    Down         = ifelse(is.na(r$n_down),       0L, r$n_down),
+    Coverage_pct = ifelse(is.na(r$coverage_pct), 0,  r$coverage_pct),
+    GO_all       = ifelse(!is.null(r$ego_all),  nrow(r$ego_all@result),  0L),
+    GO_up        = ifelse(!is.null(r$ego_up),   nrow(r$ego_up@result),   0L),
+    GO_down      = ifelse(!is.null(r$ego_down), nrow(r$ego_down@result), 0L),
+    stringsAsFactors = FALSE
+  ))
+}
+
+print(summary_df)
+
+write.csv(summary_df,
+          "./sclerotinia_pathogen_cross_timepoint_summary.csv",
+          row.names = FALSE)
+cat("\n✓ Saved: sclerotinia_pathogen_cross_timepoint_summary.csv\n")
+```
+
+## GO Term Overlap Across Timepoints
+
+```{r cross_tp_overlap, fig.width=10, fig.height=6}
+go_terms_by_tp <- list()
+for (tp in names(master_results)) {
+  r <- master_results[[tp]]
+  if(!is.null(r$ego_all) && nrow(r$ego_all@result) > 0) {
+    sig <- r$ego_all@result[r$ego_all@result$pvalue < 0.05, ]
+    go_terms_by_tp[[tp]] <- sig$ID
+  } else {
+    go_terms_by_tp[[tp]] <- character(0)
+  }
+}
+
+if(length(go_terms_by_tp) >= 2) {
+  cat("\n=== GO TERM OVERLAP ACROSS TIMEPOINTS ===\n\n")
+  for (i in 1:(length(go_terms_by_tp) - 1)) {
+    for (j in (i+1):length(go_terms_by_tp)) {
+      tp_i <- names(go_terms_by_tp)[i]
+      tp_j <- names(go_terms_by_tp)[j]
+      shared <- length(intersect(go_terms_by_tp[[tp_i]], go_terms_by_tp[[tp_j]]))
+      cat(sprintf("  %s ∩ %s: %d shared GO terms\n", tp_i, tp_j, shared))
+    }
+  }
+  if(length(go_terms_by_tp) == 3) {
+    shared_all <- Reduce(intersect, go_terms_by_tp)
+    cat(sprintf("  All three timepoints: %d shared GO terms\n\n", length(shared_all)))
+    if(length(shared_all) > 0) {
+      cat("GO terms enriched at ALL three timepoints:\n\n")
+      shared_names <- term2name[term2name$GO %in% shared_all, ]
+      print(shared_names)
+      write.csv(shared_names,
+                "./sclerotinia_pathogen_GO_shared_all_timepoints.csv",
+                row.names = FALSE)
+      cat("\n✓ Saved: sclerotinia_pathogen_GO_shared_all_timepoints.csv\n")
+    }
+  }
+}
+```
+
+---
+
+```{r session_info}
+sessionInfo()
+```

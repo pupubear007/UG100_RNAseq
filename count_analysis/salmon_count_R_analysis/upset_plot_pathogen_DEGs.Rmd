@@ -1,0 +1,543 @@
+---
+title: "UpSet Plot — Sclerotinia Pathogen DEGs Across Hosts & Timepoints"
+author: "Analysis by wan00965"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 14, fig.height = 8, dpi = 300)
+```
+
+# 1. Setup
+
+```{r load-libraries}
+library(UpSetR)
+library(ggplot2)
+library(dplyr)
+library(ComplexHeatmap)  # alternative UpSet engine (more robust)
+library(grid)
+
+cat("Libraries loaded.\n")
+```
+
+```{r set-wd}
+setwd("/Users/andrew20445/Desktop/To_do_list/RNAseq_data/New_salmon_round3/new_run_count")
+```
+
+# 2. Load DEG Data
+
+```{r load-data}
+timepoints <- c("24h", "48h", "96h")
+
+safe_load <- function(f) {
+  if (file.exists(f)) {
+    df <- read.csv(f, stringsAsFactors = FALSE, row.names = 1)
+    if (nrow(df) > 0) return(df)
+  }
+  return(NULL)
+}
+
+# Load all DEG files
+ha_degs <- setNames(lapply(timepoints, function(tp)
+  safe_load(sprintf("Ha_pathogen_aggressive_vs_low_DEGs_%s.csv", tp))), timepoints)
+
+gm_degs <- setNames(lapply(timepoints, function(tp)
+  safe_load(sprintf("Gm_pathogen_aggressive_vs_low_DEGs_%s.csv", tp))), timepoints)
+
+# Build gene sets (character vectors of gene IDs)
+ha_sets <- lapply(ha_degs, function(df) if (!is.null(df)) rownames(df) else character(0))
+gm_sets <- lapply(gm_degs, function(df) if (!is.null(df)) rownames(df) else character(0))
+
+# Which timepoints have data?
+ha_avail <- timepoints[sapply(ha_sets, function(x) length(x) > 0)]
+gm_avail <- timepoints[sapply(gm_sets, function(x) length(x) > 0)]
+
+cat("Ha timepoints with data:", paste(ha_avail, collapse = ", "), "\n")
+cat("Gm timepoints with data:", paste(gm_avail, collapse = ", "), "\n")
+
+# Combine into one named list
+all_sets <- list()
+for (tp in ha_avail) all_sets[[paste0("Ha_", tp)]] <- ha_sets[[tp]]
+for (tp in gm_avail) all_sets[[paste0("Gm_", tp)]] <- gm_sets[[tp]]
+
+cat("\nSets for UpSet plot:\n")
+for (nm in names(all_sets)) cat(sprintf("  %s: %d genes\n", nm, length(all_sets[[nm]])))
+```
+
+# 3. Build Binary Membership Matrix
+
+```{r build-matrix}
+# Create the binary matrix that both UpSetR and ComplexHeatmap need
+all_genes <- unique(unlist(all_sets))
+cat(sprintf("Total unique genes: %d\n", length(all_genes)))
+
+mat <- matrix(0L, nrow = length(all_genes), ncol = length(all_sets),
+              dimnames = list(all_genes, names(all_sets)))
+
+for (nm in names(all_sets)) {
+  mat[all_sets[[nm]], nm] <- 1L
+}
+
+# Convert to data.frame for UpSetR
+upset_df <- as.data.frame(mat)
+
+# Print intersection summary
+patterns <- apply(mat, 1, function(row) paste(names(all_sets)[row == 1], collapse = " + "))
+pattern_tab <- sort(table(patterns), decreasing = TRUE)
+
+cat("\n=== TOP 15 INTERSECTION PATTERNS ===\n")
+print(head(pattern_tab, 15))
+```
+
+---
+
+# 4. UpSet Plot — UpSetR Package (Simple & Clean)
+
+```{r upset-basic, fig.width=14, fig.height=8}
+# ===================================================================
+# Basic UpSetR plot — no queries (avoids the intersects() crash)
+# Color set bars by host: orange = Sunflower, blue = Soybean
+# ===================================================================
+
+set_order <- rev(names(all_sets))
+bar_colors <- ifelse(grepl("^Ha_", set_order), "#E69F00", "#56B4E9")
+
+upset(upset_df,
+      sets = set_order,
+      keep.order = TRUE,
+      order.by = "freq",
+      nsets = length(all_sets),
+      nintersects = 30,
+      mb.ratio = c(0.6, 0.4),
+      point.size = 4,
+      line.size = 1.5,
+      sets.bar.color = bar_colors,
+      main.bar.color = "gray30",
+      mainbar.y.label = "Intersection Size\n(Number of Pathogen DEGs)",
+      sets.x.label = "DEGs per Condition",
+      text.scale = c(1.6, 1.3, 1.2, 1.2, 1.6, 1.3),
+      set_size.show = TRUE,
+      set_size.scale_max = max(sapply(all_sets, length)) * 1.2)
+```
+
+## 4.1 With Metadata Bar Chart (by regulation direction)
+
+```{r upset-metadata, fig.width=14, fig.height=10}
+# ===================================================================
+# UpSetR with metadata: show Up/Down regulation breakdown per bar
+# ===================================================================
+
+# Build direction column: for each gene, classify as Up, Down, or Mixed
+# based on its log2FC across all conditions where it's significant
+lfc_col <- "log2FoldChange"
+
+gene_direction <- sapply(all_genes, function(g) {
+  lfcs <- c()
+  for (tp in ha_avail) {
+    df <- ha_degs[[tp]]
+    if (!is.null(df) && g %in% rownames(df)) lfcs <- c(lfcs, df[g, lfc_col])
+  }
+  for (tp in gm_avail) {
+    df <- gm_degs[[tp]]
+    if (!is.null(df) && g %in% rownames(df)) lfcs <- c(lfcs, df[g, lfc_col])
+  }
+  if (length(lfcs) == 0) return("Unknown")
+  if (all(lfcs > 0)) return("Up")
+  if (all(lfcs < 0)) return("Down")
+  return("Mixed")
+})
+
+upset_df_meta <- upset_df
+upset_df_meta$Direction <- gene_direction
+
+upset(upset_df_meta,
+      sets = set_order,
+      keep.order = TRUE,
+      order.by = "freq",
+      nsets = length(all_sets),
+      nintersects = 30,
+      mb.ratio = c(0.55, 0.45),
+      point.size = 4,
+      line.size = 1.5,
+      sets.bar.color = bar_colors,
+      mainbar.y.label = "Intersection Size",
+      sets.x.label = "DEGs per Condition",
+      text.scale = c(1.6, 1.3, 1.2, 1.2, 1.6, 1.3),
+      set_size.show = TRUE,
+      queries = list(
+        list(query = elements, params = list("Direction", "Up"),
+             color = "#D73027", active = TRUE, query.name = "Up-regulated"),
+        list(query = elements, params = list("Direction", "Down"),
+             color = "#4575B4", active = TRUE, query.name = "Down-regulated"),
+        list(query = elements, params = list("Direction", "Mixed"),
+             color = "#FDB863", active = TRUE, query.name = "Mixed")
+      ),
+      query.legend = "top")
+```
+
+---
+
+# 5. UpSet Plot — ComplexHeatmap (Recommended)
+
+```{r complex-upset, fig.width=14, fig.height=8}
+# ===================================================================
+# ComplexHeatmap::UpSet is more powerful and does NOT have the
+# intersects() crash bug. It also supports better annotations.
+# ===================================================================
+
+# Create combination matrix
+comb_mat <- make_comb_mat(mat, mode = "distinct")
+
+# Filter: only show intersections with >= 2 genes (remove singletons)
+comb_mat <- comb_mat[comb_size(comb_mat) >= 2]
+
+# Sort by frequency
+comb_mat <- comb_mat[order(comb_size(comb_mat), decreasing = TRUE)]
+
+# Define set colors
+set_cols <- ifelse(grepl("^Ha_", set_name(comb_mat)), "#E69F00", "#56B4E9")
+
+# Identify cross-host intersections for bar coloring
+comb_names <- comb_name(comb_mat)
+bar_col <- rep("gray30", length(comb_names))
+
+# Color bars involving both hosts
+for (i in seq_along(comb_names)) {
+  members <- set_name(comb_mat)[as.logical(as.integer(strsplit(comb_names[i], "")[[1]]))]
+  has_ha <- any(grepl("^Ha_", members))
+  has_gm <- any(grepl("^Gm_", members))
+  if (has_ha && has_gm) {
+    bar_col[i] <- "#DC143C"  # red for cross-host
+  } else if (has_ha) {
+    bar_col[i] <- "#E69F00"  # orange for Ha-only
+  } else if (has_gm) {
+    bar_col[i] <- "#56B4E9"  # blue for Gm-only
+  }
+}
+
+# Draw UpSet
+ht <- UpSet(comb_mat,
+      set_order = rev(set_name(comb_mat)),
+      comb_order = order(comb_size(comb_mat), decreasing = TRUE),
+      
+      # Top bar (intersection sizes)
+      top_annotation = HeatmapAnnotation(
+        "Intersection\nSize" = anno_barplot(
+          comb_size(comb_mat),
+          gp = gpar(fill = bar_col, col = bar_col),
+          border = FALSE,
+          height = unit(8, "cm"),
+          add_numbers = TRUE,
+          numbers_gp = gpar(fontsize = 9)
+        ),
+        annotation_name_side = "left",
+        annotation_name_rot = 0
+      ),
+      
+      # Left bar (set sizes)
+      left_annotation = rowAnnotation(
+        "Set Size" = anno_barplot(
+          set_size(comb_mat),
+          gp = gpar(fill = set_cols),
+          border = FALSE,
+          width = unit(4, "cm"),
+          add_numbers = TRUE,
+          numbers_gp = gpar(fontsize = 10)
+        ),
+        annotation_name_rot = 0
+      ),
+      
+      # Matrix dots
+      pt_size = unit(4, "mm"),
+      lwd = 2,
+      
+      # Row/column labels
+      row_names_gp = gpar(fontsize = 12, fontface = "bold",
+                           col = set_cols),
+      
+      # Column title
+      column_title = "Sclerotinia Pathogen DEGs: Cross-Host UpSet Plot",
+      column_title_gp = gpar(fontsize = 16, fontface = "bold")
+)
+
+draw(ht)
+
+# Legend
+grid.text("Orange = Sunflower (Ha)  |  Blue = Soybean (Gm)  |  Red = Cross-host",
+          x = 0.5, y = 0.01, gp = gpar(fontsize = 11, col = "gray40"))
+```
+
+## 5.1 ComplexHeatmap UpSet with Direction Annotation
+
+```{r complex-upset-annotated, fig.width=14, fig.height=9}
+# ===================================================================
+# Enhanced version: add a stacked bar showing Up/Down/Mixed per intersection
+# ===================================================================
+
+# Recalculate direction counts per intersection
+comb_mat2 <- make_comb_mat(mat, mode = "distinct")
+comb_mat2 <- comb_mat2[comb_size(comb_mat2) >= 2]
+comb_mat2 <- comb_mat2[order(comb_size(comb_mat2), decreasing = TRUE)]
+
+# For each intersection, count Up/Down/Mixed genes
+comb_ids <- comb_name(comb_mat2)
+dir_counts <- data.frame(Up = integer(length(comb_ids)),
+                          Down = integer(length(comb_ids)),
+                          Mixed = integer(length(comb_ids)))
+
+for (i in seq_along(comb_ids)) {
+  genes_in_comb <- extract_comb(comb_mat2, comb_ids[i])
+  dirs <- gene_direction[genes_in_comb]
+  dir_counts$Up[i]    <- sum(dirs == "Up", na.rm = TRUE)
+  dir_counts$Down[i]  <- sum(dirs == "Down", na.rm = TRUE)
+  dir_counts$Mixed[i] <- sum(dirs == "Mixed", na.rm = TRUE)
+}
+
+# Set colors
+set_cols2 <- ifelse(grepl("^Ha_", set_name(comb_mat2)), "#E69F00", "#56B4E9")
+
+# Bar colors for intersections
+bar_col2 <- rep("gray30", length(comb_ids))
+for (i in seq_along(comb_ids)) {
+  members <- set_name(comb_mat2)[as.logical(as.integer(strsplit(comb_ids[i], "")[[1]]))]
+  has_ha <- any(grepl("^Ha_", members))
+  has_gm <- any(grepl("^Gm_", members))
+  if (has_ha && has_gm) bar_col2[i] <- "#DC143C"
+  else if (has_ha) bar_col2[i] <- "#E69F00"
+  else if (has_gm) bar_col2[i] <- "#56B4E9"
+}
+
+ht2 <- UpSet(comb_mat2,
+      set_order = rev(set_name(comb_mat2)),
+      comb_order = order(comb_size(comb_mat2), decreasing = TRUE),
+      
+      top_annotation = HeatmapAnnotation(
+        # Main bar: intersection size
+        "Intersection\nSize" = anno_barplot(
+          comb_size(comb_mat2),
+          gp = gpar(fill = bar_col2, col = bar_col2),
+          border = FALSE,
+          height = unit(6, "cm"),
+          add_numbers = TRUE,
+          numbers_gp = gpar(fontsize = 8)
+        ),
+        # Stacked bar: direction breakdown
+        "Regulation" = anno_barplot(
+          as.matrix(dir_counts),
+          gp = gpar(fill = c("#D73027", "#4575B4", "#FDB863"),
+                    col = c("#D73027", "#4575B4", "#FDB863")),
+          border = FALSE,
+          height = unit(4, "cm"),
+          bar_width = 0.8
+        ),
+        annotation_name_side = "left",
+        annotation_name_rot = 0,
+        gap = unit(2, "mm")
+      ),
+      
+      left_annotation = rowAnnotation(
+        "Set Size" = anno_barplot(
+          set_size(comb_mat2),
+          gp = gpar(fill = set_cols2),
+          border = FALSE,
+          width = unit(4, "cm"),
+          add_numbers = TRUE,
+          numbers_gp = gpar(fontsize = 10)
+        ),
+        annotation_name_rot = 0
+      ),
+      
+      pt_size = unit(4, "mm"),
+      lwd = 2,
+      row_names_gp = gpar(fontsize = 12, fontface = "bold", col = set_cols2),
+      column_title = "Pathogen DEGs: Intersection Size & Regulation Direction",
+      column_title_gp = gpar(fontsize = 15, fontface = "bold")
+)
+
+# Add legend
+lgd <- Legend(
+  labels = c("Up-regulated", "Down-regulated", "Mixed"),
+  legend_gp = gpar(fill = c("#D73027", "#4575B4", "#FDB863")),
+  title = "Regulation",
+  title_gp = gpar(fontsize = 11, fontface = "bold"),
+  labels_gp = gpar(fontsize = 10)
+)
+
+draw(ht2, annotation_legend_list = list(lgd))
+```
+
+---
+
+# 6. UpSet — Focused on Cross-Host Comparison Only
+
+```{r upset-cross-only, fig.width=12, fig.height=7}
+# ===================================================================
+# Simplified 2-set view: combine all Ha timepoints vs all Gm timepoints
+# Then break down by which timepoints each gene appears in
+# ===================================================================
+
+# 4-set version: Ha_early(24h), Ha_late(48+96h), Gm_early(24h), Gm_late(48+96h)
+sets_grouped <- list()
+
+if (length(ha_avail) > 0) {
+  if ("24h" %in% ha_avail) sets_grouped[["Ha_early\n(24h)"]] <- ha_sets[["24h"]]
+  late_ha <- unique(c(
+    if ("48h" %in% ha_avail) ha_sets[["48h"]] else character(0),
+    if ("96h" %in% ha_avail) ha_sets[["96h"]] else character(0)
+  ))
+  if (length(late_ha) > 0) sets_grouped[["Ha_late\n(48-96h)"]] <- late_ha
+}
+
+if (length(gm_avail) > 0) {
+  if ("24h" %in% gm_avail) sets_grouped[["Gm_early\n(24h)"]] <- gm_sets[["24h"]]
+  late_gm <- unique(c(
+    if ("48h" %in% gm_avail) gm_sets[["48h"]] else character(0),
+    if ("96h" %in% gm_avail) gm_sets[["96h"]] else character(0)
+  ))
+  if (length(late_gm) > 0) sets_grouped[["Gm_late\n(48-96h)"]] <- late_gm
+}
+
+if (length(sets_grouped) >= 2) {
+  
+  all_g2 <- unique(unlist(sets_grouped))
+  mat2 <- matrix(0L, nrow = length(all_g2), ncol = length(sets_grouped),
+                 dimnames = list(all_g2, names(sets_grouped)))
+  for (nm in names(sets_grouped)) mat2[sets_grouped[[nm]], nm] <- 1L
+  
+  comb_mat3 <- make_comb_mat(mat2, mode = "distinct")
+  comb_mat3 <- comb_mat3[comb_size(comb_mat3) >= 1]
+  comb_mat3 <- comb_mat3[order(comb_size(comb_mat3), decreasing = TRUE)]
+  
+  set_cols3 <- ifelse(grepl("^Ha", set_name(comb_mat3)), "#E69F00", "#56B4E9")
+  
+  comb_ids3 <- comb_name(comb_mat3)
+  bar_col3 <- rep("gray30", length(comb_ids3))
+  for (i in seq_along(comb_ids3)) {
+    members <- set_name(comb_mat3)[as.logical(as.integer(strsplit(comb_ids3[i], "")[[1]]))]
+    has_ha <- any(grepl("^Ha", members))
+    has_gm <- any(grepl("^Gm", members))
+    if (has_ha && has_gm) bar_col3[i] <- "#DC143C"
+    else if (has_ha) bar_col3[i] <- "#E69F00"
+    else if (has_gm) bar_col3[i] <- "#56B4E9"
+  }
+  
+  ht3 <- UpSet(comb_mat3,
+        set_order = rev(set_name(comb_mat3)),
+        comb_order = order(comb_size(comb_mat3), decreasing = TRUE),
+        top_annotation = HeatmapAnnotation(
+          "Intersection\nSize" = anno_barplot(
+            comb_size(comb_mat3),
+            gp = gpar(fill = bar_col3, col = bar_col3),
+            border = FALSE, height = unit(7, "cm"),
+            add_numbers = TRUE, numbers_gp = gpar(fontsize = 10)),
+          annotation_name_side = "left", annotation_name_rot = 0),
+        left_annotation = rowAnnotation(
+          "Set Size" = anno_barplot(
+            set_size(comb_mat3),
+            gp = gpar(fill = set_cols3),
+            border = FALSE, width = unit(4, "cm"),
+            add_numbers = TRUE, numbers_gp = gpar(fontsize = 11)),
+          annotation_name_rot = 0),
+        pt_size = unit(5, "mm"), lwd = 2.5,
+        row_names_gp = gpar(fontsize = 13, fontface = "bold", col = set_cols3),
+        column_title = "Pathogen DEGs: Early vs Late × Sunflower vs Soybean",
+        column_title_gp = gpar(fontsize = 15, fontface = "bold"))
+  
+  draw(ht3)
+  grid.text("Orange = Sunflower  |  Blue = Soybean  |  Red = Cross-host",
+            x = 0.5, y = 0.01, gp = gpar(fontsize = 11, col = "gray40"))
+}
+```
+
+---
+
+# 7. Save Plots as PDF
+
+```{r save-pdfs, eval=FALSE}
+# --- UpSetR version ---
+pdf("Fig_UpSet_pathogen_DEGs_UpSetR.pdf", width = 14, height = 8)
+upset(upset_df,
+      sets = set_order, keep.order = TRUE, order.by = "freq",
+      nsets = length(all_sets), nintersects = 30,
+      mb.ratio = c(0.6, 0.4), point.size = 4, line.size = 1.5,
+      sets.bar.color = bar_colors, main.bar.color = "gray30",
+      mainbar.y.label = "Intersection Size", sets.x.label = "DEGs per Condition",
+      text.scale = c(1.6, 1.3, 1.2, 1.2, 1.6, 1.3), set_size.show = TRUE)
+dev.off()
+cat("Saved: Fig_UpSet_pathogen_DEGs_UpSetR.pdf\n")
+
+# --- ComplexHeatmap version (recommended) ---
+pdf("Fig_UpSet_pathogen_DEGs_ComplexHeatmap.pdf", width = 14, height = 8)
+draw(ht)
+grid.text("Orange = Sunflower (Ha)  |  Blue = Soybean (Gm)  |  Red = Cross-host",
+          x = 0.5, y = 0.01, gp = gpar(fontsize = 11, col = "gray40"))
+dev.off()
+cat("Saved: Fig_UpSet_pathogen_DEGs_ComplexHeatmap.pdf\n")
+
+# --- ComplexHeatmap with direction annotation ---
+pdf("Fig_UpSet_pathogen_DEGs_with_direction.pdf", width = 14, height = 9)
+draw(ht2, annotation_legend_list = list(lgd))
+dev.off()
+cat("Saved: Fig_UpSet_pathogen_DEGs_with_direction.pdf\n")
+
+# --- Early/Late grouped version ---
+if (exists("ht3")) {
+  pdf("Fig_UpSet_pathogen_DEGs_early_vs_late.pdf", width = 12, height = 7)
+  draw(ht3)
+  grid.text("Orange = Sunflower  |  Blue = Soybean  |  Red = Cross-host",
+            x = 0.5, y = 0.01, gp = gpar(fontsize = 11, col = "gray40"))
+  dev.off()
+  cat("Saved: Fig_UpSet_pathogen_DEGs_early_vs_late.pdf\n")
+}
+```
+
+---
+
+# 8. Summary
+
+```{r summary}
+cat("\n=== UPSET PLOT SUMMARY ===\n\n")
+cat(sprintf("Total unique pathogen DEGs: %d\n", length(all_genes)))
+cat(sprintf("Sets: %d (%s)\n", length(all_sets), paste(names(all_sets), collapse=", ")))
+
+cat("\nSet sizes:\n")
+for (nm in names(all_sets)) cat(sprintf("  %s: %d\n", nm, length(all_sets[[nm]])))
+
+cat("\nDirection breakdown:\n")
+cat(sprintf("  Up-regulated:   %d (%.1f%%)\n", sum(gene_direction=="Up"),
+            100*mean(gene_direction=="Up")))
+cat(sprintf("  Down-regulated: %d (%.1f%%)\n", sum(gene_direction=="Down"),
+            100*mean(gene_direction=="Down")))
+cat(sprintf("  Mixed:          %d (%.1f%%)\n", sum(gene_direction=="Mixed"),
+            100*mean(gene_direction=="Mixed")))
+
+cat("\nCross-host overlap:\n")
+ha_all <- unique(unlist(ha_sets))
+gm_all <- unique(unlist(gm_sets))
+cat(sprintf("  Ha total: %d  |  Gm total: %d  |  Shared: %d\n",
+            length(ha_all), length(gm_all), length(intersect(ha_all, gm_all))))
+
+for (tp in intersect(ha_avail, gm_avail)) {
+  cat(sprintf("  Shared at %s: %d\n", tp, length(intersect(ha_sets[[tp]], gm_sets[[tp]]))))
+}
+
+cat("\nPlots generated:\n")
+cat("  1. UpSetR basic (set bars colored by host)\n")
+cat("  2. UpSetR with Up/Down/Mixed metadata\n")
+cat("  3. ComplexHeatmap UpSet (cross-host bars in red)\n")
+cat("  4. ComplexHeatmap UpSet + regulation stacked bars\n")
+cat("  5. Grouped early/late × host comparison\n")
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```

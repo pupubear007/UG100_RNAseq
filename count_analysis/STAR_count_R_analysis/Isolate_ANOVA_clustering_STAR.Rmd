@@ -1,0 +1,869 @@
+---
+title: "Isolate-Level ANOVA & Aggressiveness Group Confirmation"
+subtitle: "Per-gene ANOVA on S. sclerotiorum isolate effect with emmeans/CLD"
+author: "Analysis by wan00965"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 7)
+```
+
+# Overview
+
+**Goal:** Determine whether *S. sclerotiorum* isolates cluster by
+aggressiveness phenotype at the transcriptional level.
+
+**Hypothesis — Expected grouping:**
+
+| Group | Isolates | Color |
+|-------|----------|-------|
+| Low aggressive | WISS47, JS659 | Blue |
+| High aggressive | MNSS6, Xtra7 | Red |
+| Soybean-specific | SSPotter | Brown |
+| Sunflower-specific | BN172 | Purple |
+
+**Approach:**
+
+1. Per-gene ANOVA (isolate + timepoint + block) → genes with significant isolate effect
+2. emmeans + Tukey pairwise + CLD on each significant gene
+3. CLD concordance → do WISS47 & JS659 share a group? MNSS6 & Xtra7?
+4. Planned contrasts → High vs Low, SSPotter vs BN172, Specialists vs Generalists
+5. Heatmap of significant genes → visual confirmation of clustering
+6. Block (biological replicate) variance check
+
+**Four datasets:**
+
+- A. Pathogen genes on soybean
+- B. Pathogen genes on sunflower
+- C. Soybean host genes
+- D. Sunflower host genes
+
+# Setup
+
+```{r load-libraries}
+library(DESeq2)
+library(car)
+library(emmeans)
+library(multcomp)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(pheatmap)
+library(RColorBrewer)
+library(gridExtra)
+library(vegan)
+
+cat("All libraries loaded.\n")
+```
+
+```{r set-directory}
+# TODO: set the working directory to the folder containing your STAR count matrices and DEG CSVs
+# setwd("/path/to/your/STAR/output")
+dir.create("isolate_anova_results", showWarnings = FALSE)
+```
+
+# Load Data
+
+```{r load-counts}
+counts_soy_host     <- read.table("soybean_host_only_STAR.txt",
+                                   header = TRUE, row.names = 1, check.names = FALSE)
+counts_soy_pathogen <- read.table("pathogen_soybean_STAR.txt",
+                                   header = TRUE, row.names = 1, check.names = FALSE)
+counts_sun_host     <- read.table("sunflower_host_only_STAR.txt",
+                                   header = TRUE, row.names = 1, check.names = FALSE)
+counts_sun_pathogen <- read.table("pathogen_sunflower_STAR.txt",
+                                   header = TRUE, row.names = 1, check.names = FALSE)
+
+cat(sprintf("Soybean:   %d host genes, %d pathogen genes, %d samples\n",
+            nrow(counts_soy_host), nrow(counts_soy_pathogen), ncol(counts_soy_host)))
+cat(sprintf("Sunflower: %d host genes, %d pathogen genes, %d samples\n",
+            nrow(counts_sun_host), nrow(counts_sun_pathogen), ncol(counts_sun_host)))
+```
+
+## Build Metadata
+
+```{r build-metadata}
+build_metadata <- function(sample_names) {
+  meta <- data.frame(
+    sample    = sample_names,
+    timepoint = sapply(sample_names, function(x) {
+      parts <- strsplit(x, "_")[[1]]
+      if (parts[length(parts)] == "NC") "NC" else paste0(parts[1], "h")
+    }),
+    block   = sapply(strsplit(sample_names, "_"), `[`, 2),
+    isolate = sapply(strsplit(sample_names, "_"), `[`, 4),
+    row.names = sample_names,
+    stringsAsFactors = FALSE
+  )
+  # Remap blocks 4,5,6 → 1,2,3 so that biological replicates are
+
+  # consistently numbered across timepoint batches in both crops.
+  block_remap <- c("4" = "1", "5" = "2", "6" = "3")
+  idx <- meta$block %in% names(block_remap)
+  if (any(idx)) {
+    cat(sprintf("  Remapping %d samples: block 4->1, 5->2, 6->3\n", sum(idx)))
+    meta$block[idx] <- block_remap[meta$block[idx]]
+  }
+  meta$aggr_group <- dplyr::case_when(
+    meta$isolate %in% c("WISS47", "JS659")  ~ "Low",
+    meta$isolate %in% c("MNSS6", "Xtra7")   ~ "High",
+    meta$isolate == "SSPotter"               ~ "Soy-specific",
+    meta$isolate == "BN172"                  ~ "Sun-specific",
+    meta$isolate == "NC"                     ~ "NC",
+    TRUE                                     ~ NA_character_
+  )
+  meta$timepoint  <- factor(meta$timepoint,  levels = c("NC","24h","48h","96h"))
+  meta$block      <- factor(meta$block, levels = c("1", "2", "3"))
+  meta$isolate    <- factor(meta$isolate,
+                            levels = c("NC","WISS47","JS659","MNSS6","Xtra7","BN172","SSPotter"))
+  meta$aggr_group <- factor(meta$aggr_group,
+                            levels = c("Low","High","Soy-specific","Sun-specific","NC"))
+  return(meta)
+}
+
+meta_soy <- build_metadata(colnames(counts_soy_host))
+meta_sun <- build_metadata(colnames(counts_sun_host))
+
+cat("── Soybean samples ──\n")
+print(table(meta_soy$isolate, meta_soy$timepoint))
+cat("\n── Soybean: timepoint x block (after remapping) ──\n")
+print(table(meta_soy$timepoint, meta_soy$block))
+cat("\n── Sunflower samples ──\n")
+print(table(meta_sun$isolate, meta_sun$timepoint))
+cat("\n── Sunflower: timepoint x block (after remapping) ──\n")
+print(table(meta_sun$timepoint, meta_sun$block))
+```
+
+## Prepare VST Objects (exclude NC)
+
+```{r prepare-vst}
+make_vst <- function(counts, metadata, design_formula,
+                     min_count = 10, min_samples = 3) {
+  counts <- round(counts)
+  keep   <- rowSums(counts >= min_count) >= min_samples
+  counts <- counts[keep, ]
+  dds    <- DESeqDataSetFromMatrix(countData = counts,
+                                   colData   = metadata,
+                                   design    = design_formula)
+  dds    <- DESeq(dds)
+  # varianceStabilizingTransformation() instead of vst() so this works on
+  # the small pathogen matrices (vst() needs >=1000 genes with mean count > 5
+  # to subsample for parametric fit; pathogen matrices are typically smaller).
+  vst_obj <- varianceStabilizingTransformation(dds, blind = FALSE)
+  idx     <- vst_obj$timepoint != "NC"
+  vst_obj <- vst_obj[, idx]
+  colData(vst_obj) <- droplevels(colData(vst_obj))
+  return(vst_obj)
+}
+
+cat("Building VST objects (this takes a few minutes)...\n\n")
+
+vst_soy_pathogen <- make_vst(counts_soy_pathogen, meta_soy, ~ timepoint)
+cat(sprintf("Soybean pathogen: %d genes x %d samples\n",
+            nrow(vst_soy_pathogen), ncol(vst_soy_pathogen)))
+
+vst_sun_pathogen <- make_vst(counts_sun_pathogen, meta_sun, ~ timepoint)
+cat(sprintf("Sunflower pathogen: %d genes x %d samples\n",
+            nrow(vst_sun_pathogen), ncol(vst_sun_pathogen)))
+
+vst_soy_host <- make_vst(counts_soy_host, meta_soy, ~ timepoint)
+cat(sprintf("Soybean host: %d genes x %d samples\n",
+            nrow(vst_soy_host), ncol(vst_soy_host)))
+
+vst_sun_host <- make_vst(counts_sun_host, meta_sun, ~ timepoint)
+cat(sprintf("Sunflower host: %d genes x %d samples\n",
+            nrow(vst_sun_host), ncol(vst_sun_host)))
+```
+
+## Diagnostic: verify metadata & test one gene
+
+```{r diagnostic-check}
+cat("── colData columns in vst_soy_pathogen ──\n")
+print(colnames(colData(vst_soy_pathogen)))
+
+cat("\n── Factor levels after dropping NC ──\n")
+cat("  isolate:  ", levels(vst_soy_pathogen$isolate), "\n")
+cat("  timepoint:", levels(vst_soy_pathogen$timepoint), "\n")
+cat("  block:    ", levels(vst_soy_pathogen$block), "\n")
+
+cat("\n── Cross-tabulation: isolate x timepoint x block ──\n")
+print(ftable(xtabs(~ isolate + timepoint + block,
+                    data = as.data.frame(colData(vst_soy_pathogen)))))
+
+cat("\n── timepoint x block crossing (after remapping) ──\n")
+diag_meta <- as.data.frame(colData(vst_soy_pathogen))
+print(table(diag_meta$timepoint, diag_meta$block))
+
+# Df-based confounding test
+diag_fit     <- lm(assay(vst_soy_pathogen)[1, ] ~ isolate + timepoint + block, data = diag_meta)
+diag_av      <- anova(diag_fit)
+tp_df_actual <- diag_av["timepoint", "Df"]
+tp_df_expect <- nlevels(diag_meta$timepoint) - 1
+cat(sprintf("\n  Timepoint Df with block in model: %d  (expected: %d)  -->  %s\n",
+            tp_df_actual, tp_df_expect,
+            ifelse(tp_df_actual == tp_df_expect,
+                   "GOOD - block is estimable",
+                   "PROBLEM - block confounded")))
+
+# Test ANOVA on first gene
+cat("\n── Test ANOVA on first gene ──\n")
+test_expr <- assay(vst_soy_pathogen)[1, ]
+test_meta <- as.data.frame(colData(vst_soy_pathogen))
+test_df   <- data.frame(expr = test_expr, test_meta)
+
+cat(sprintf("  Samples: %d, isolate levels: %d, timepoint levels: %d, block levels: %d\n",
+            nrow(test_df), nlevels(test_df$isolate),
+            nlevels(test_df$timepoint), nlevels(test_df$block)))
+
+test_fit <- tryCatch(
+  lm(expr ~ isolate + timepoint + block, data = test_df),
+  error = function(e) { cat("  lm() ERROR:", conditionMessage(e), "\n"); NULL }
+)
+
+if (!is.null(test_fit)) {
+  cat(sprintf("  lm() succeeded. Residual df: %d\n", test_fit$df.residual))
+  al <- alias(test_fit)
+  if (!is.null(al$Complete) && nrow(al$Complete) > 0) {
+    cat("  WARNING: Aliased coefficients:\n")
+    print(al$Complete)
+  }
+
+  # Try all Anova types
+  for (atype in c("III", "II")) {
+    av <- tryCatch({
+      if (atype == "III") options(contrasts = c("contr.sum", "contr.poly"))
+      Anova(test_fit, type = atype)
+    }, error = function(e) NULL)
+    if (!is.null(av)) {
+      cat(sprintf("  Type %s ANOVA works.\n", atype))
+      cat("  Row names:", paste(rownames(av), collapse = ", "), "\n")
+      print(av)
+      break
+    } else {
+      cat(sprintf("  Type %s ANOVA failed.\n", atype))
+    }
+  }
+}
+```
+
+
+# Reusable ANOVA Engine
+
+```{r define-engine}
+isolate_colors <- c("WISS47" = "#3ACAFF", "JS659"   = "#00BFB2",
+                     "MNSS6"  = "#FF3173", "Xtra7"   = "#FF5F3A",
+                     "BN172"  = "#e682fa", "SSPotter" = "#8c564b")
+aggr_colors <- c("Low" = "#1f77b4", "High" = "#d62728",
+                  "Soy-specific" = "#8c564b", "Sun-specific" = "#e682fa")
+tp_colors <- c("24h" = "#FFD700", "48h" = "#FF6347", "96h" = "#8B0000")
+
+# ── Safe ANOVA: tries Type III, II, then I ──
+safe_anova <- function(fit) {
+  av <- tryCatch({
+    options(contrasts = c("contr.sum", "contr.poly"))
+    Anova(fit, type = "III")
+  }, error = function(e) NULL)
+  if (!is.null(av)) return(av)
+  av <- tryCatch(Anova(fit, type = "II"), error = function(e) NULL)
+  if (!is.null(av)) return(av)
+  tryCatch(anova(fit), error = function(e) NULL)
+}
+
+# ── Extract F and p robustly from any anova-like table ──
+extract_stats <- function(av, term) {
+  av_df <- as.data.frame(av)
+  f_col <- grep("^F", colnames(av_df), value = TRUE)[1]
+  p_col <- grep("Pr\\(", colnames(av_df), value = TRUE)[1]
+  if (term %in% rownames(av_df) && !is.na(f_col) && !is.na(p_col)) {
+    return(c(F_val = av_df[term, f_col], p_val = av_df[term, p_col]))
+  }
+  c(F_val = NA_real_, p_val = NA_real_)
+}
+
+# ════════════════════════════════════════════════════════════════════
+# CORE: per-gene ANOVA -> pairwise -> CLD -> planned contrasts
+# ════════════════════════════════════════════════════════════════════
+run_isolate_anova <- function(vst_obj, label, out_prefix) {
+
+  expr_mat <- assay(vst_obj)
+  meta     <- as.data.frame(colData(vst_obj))
+  n_genes  <- nrow(expr_mat)
+
+  cat(sprintf("\n====== %s: %d genes x %d samples ======\n",
+              label, n_genes, ncol(expr_mat)))
+  cat(sprintf("  Factors: isolate(%d) timepoint(%d) block(%d)\n",
+              nlevels(meta$isolate), nlevels(meta$timepoint), nlevels(meta$block)))
+
+  # Diagnostic: show timepoint x block crossing
+  tp_block_tab <- table(meta$timepoint, meta$block)
+  cat("\n-- timepoint x block cross-tab --\n")
+  print(tp_block_tab)
+
+  # Safety check: verify timepoint Df is not absorbed by block
+  test_fit_full <- lm(expr_mat[1, ] ~ isolate + timepoint + block, data = meta)
+  av_test       <- anova(test_fit_full)
+  tp_df_actual  <- av_test["timepoint", "Df"]
+  tp_df_expect  <- nlevels(meta$timepoint) - 1
+  use_block     <- (tp_df_actual == tp_df_expect)
+
+  if (!use_block) {
+    cat(sprintf("\n  ** WARNING: block partially confounded (timepoint Df = %d, expected %d). Dropping block. **\n",
+                tp_df_actual, tp_df_expect))
+    model_formula_str <- "isolate + timepoint"
+  } else {
+    cat(sprintf("\n  Block OK (timepoint Df = %d as expected) -- including in models.\n",
+                tp_df_actual))
+    model_formula_str <- "isolate + timepoint + block"
+  }
+
+  # 1. PERMANOVA
+  dist_mat <- vegdist(t(expr_mat), method = "euclidean")
+  set.seed(42)
+  perm_formula <- as.formula(paste("dist_mat ~", model_formula_str))
+  perm_res <- adonis2(perm_formula,
+                       data = meta, permutations = 999,
+                       method = "euclidean", by = "margin")
+  cat("\n-- PERMANOVA (marginal) --\n")
+  print(perm_res)
+  write.csv(as.data.frame(perm_res),
+            file.path("isolate_anova_results", paste0(out_prefix, "_PERMANOVA.csv")))
+
+  # 2. Per-gene ANOVA
+  cat("Running per-gene ANOVA...\n")
+  first_error <- NULL
+
+  anova_list <- lapply(seq_len(n_genes), function(i) {
+    df <- data.frame(expr = expr_mat[i, ], meta)
+    gene_formula <- as.formula(paste("expr ~", model_formula_str))
+    fit <- tryCatch(
+      lm(gene_formula, data = df),
+      error = function(e) {
+        if (is.null(first_error)) first_error <<- conditionMessage(e)
+        NULL
+      })
+    if (is.null(fit)) return(NULL)
+
+    av <- safe_anova(fit)
+    if (is.null(av)) {
+      if (is.null(first_error)) first_error <<- "all Anova types failed"
+      return(NULL)
+    }
+
+    iso <- extract_stats(av, "isolate")
+    tp  <- extract_stats(av, "timepoint")
+    blk <- if (use_block) extract_stats(av, "block") else c(F_val = NA_real_, p_val = NA_real_)
+
+    data.frame(gene        = rownames(expr_mat)[i],
+               F_isolate   = iso["F_val"],  p_isolate   = iso["p_val"],
+               F_timepoint = tp["F_val"],   p_timepoint = tp["p_val"],
+               F_block     = blk["F_val"],  p_block     = blk["p_val"],
+               stringsAsFactors = FALSE, row.names = NULL)
+  })
+
+  valid <- Filter(Negate(is.null), anova_list)
+
+  if (length(valid) == 0) {
+    cat("  ALL per-gene ANOVAs failed!\n")
+    if (!is.null(first_error)) cat("  First error:", first_error, "\n")
+    return(list(pergene = data.frame(), perm = perm_res,
+                pairwise = NULL, cld_all = NULL,
+                concordance = NULL, planned = NULL))
+  }
+
+  pergene <- do.call(rbind, valid)
+  n_ok    <- nrow(pergene)
+  if (n_ok < n_genes) {
+    cat(sprintf("  %d / %d genes failed (%.1f%%). First error: %s\n",
+                n_genes - n_ok, n_genes, 100*(n_genes - n_ok)/n_genes,
+                ifelse(is.null(first_error), "unknown", first_error)))
+  }
+
+  pergene$padj_isolate   <- p.adjust(pergene$p_isolate,   method = "BH")
+  pergene$padj_timepoint <- p.adjust(pergene$p_timepoint, method = "BH")
+  pergene$padj_block     <- p.adjust(pergene$p_block,     method = "BH")
+
+  n_sig_iso <- sum(pergene$padj_isolate   < 0.05, na.rm = TRUE)
+  n_sig_tp  <- sum(pergene$padj_timepoint < 0.05, na.rm = TRUE)
+  n_sig_blk <- sum(pergene$padj_block     < 0.05, na.rm = TRUE)
+
+  cat(sprintf("\n-- Per-gene ANOVA summary (padj < 0.05) --\n"))
+  cat(sprintf("  Isolate:   %d / %d (%.1f%%)\n", n_sig_iso, n_ok, 100*n_sig_iso/n_ok))
+  cat(sprintf("  Timepoint: %d / %d (%.1f%%)\n", n_sig_tp,  n_ok, 100*n_sig_tp/n_ok))
+  cat(sprintf("  Block:     %d / %d (%.1f%%)\n", n_sig_blk, n_ok, 100*n_sig_blk/n_ok))
+
+  write.csv(pergene, file.path("isolate_anova_results",
+                                paste0(out_prefix, "_pergene_ANOVA.csv")),
+            row.names = FALSE)
+
+  # 3. Block variation diagnostic
+  cat(sprintf("\n-- Block (biological replicate) variation --\n"))
+  if (!use_block) {
+    cat("  Block dropped (confounded with timepoint). No block test available.\n")
+  } else {
+    blk_pct <- 100 * n_sig_blk / n_ok
+    cat(sprintf("  Significant block effect: %d (%.1f%%)\n", n_sig_blk, blk_pct))
+    if      (blk_pct < 5)  cat("  -> Low. Replicates are consistent.\n")
+    else if (blk_pct < 15) cat("  -> Moderate. Some replicate variation.\n")
+    else                    cat("  -> High. Consider batch correction.\n")
+  }
+
+  # 4. emmeans + Tukey pairwise + CLD
+  sig_genes <- pergene$gene[which(pergene$padj_isolate < 0.05)]
+
+  cat(sprintf("\n-- emmeans pairwise on %d isolate-sig genes --\n",
+              length(sig_genes)))
+
+  if (length(sig_genes) == 0) {
+    cat("  No significant isolate-effect genes.\n")
+    return(list(pergene = pergene, perm = perm_res,
+                pairwise = NULL, cld_all = NULL,
+                concordance = NULL, planned = NULL))
+  }
+
+  genes_to_test <- head(sig_genes, 1000)
+  pw_list  <- list()
+  cld_list <- list()
+  pw_errors <- 0
+
+  for (g in genes_to_test) {
+    ok <- tryCatch({
+      df  <- data.frame(expr = expr_mat[g, ], meta)
+      gene_formula <- as.formula(paste("expr ~", model_formula_str))
+      fit <- lm(gene_formula, data = df)
+      emm <- emmeans(fit, ~ isolate)
+      pw  <- pairs(emm, adjust = "tukey")
+      pw_df      <- as.data.frame(summary(pw));  pw_df$gene <- g
+      cld_df     <- as.data.frame(cld(emm, Letters = letters, adjust = "tukey"))
+      cld_df$gene <- g
+      pw_list[[g]]  <<- pw_df
+      cld_list[[g]] <<- cld_df
+      TRUE
+    }, error = function(e) { pw_errors <<- pw_errors + 1; FALSE })
+  }
+  if (pw_errors > 0)
+    cat(sprintf("  %d emmeans errors (skipped)\n", pw_errors))
+
+  if (length(pw_list) == 0) {
+    cat("  All emmeans failed.\n")
+    return(list(pergene = pergene, perm = perm_res,
+                pairwise = NULL, cld_all = NULL,
+                concordance = NULL, planned = NULL))
+  }
+
+  pairwise_all <- do.call(rbind, pw_list)
+  cld_all      <- do.call(rbind, cld_list)
+
+  write.csv(pairwise_all, file.path("isolate_anova_results",
+                                     paste0(out_prefix, "_pairwise_isolate.csv")),
+            row.names = FALSE)
+  write.csv(cld_all, file.path("isolate_anova_results",
+                                paste0(out_prefix, "_CLD_isolate.csv")),
+            row.names = FALSE)
+  cat(sprintf("  Saved %d pairwise comparisons for %d genes\n",
+              nrow(pairwise_all), length(pw_list)))
+
+  # 5. CLD concordance
+  cat("\n-- CLD Concordance with Hypothesis --\n")
+
+  check_same_group <- function(cld_g, iso1, iso2) {
+    g1 <- trimws(cld_g$.group[cld_g$isolate == iso1])
+    g2 <- trimws(cld_g$.group[cld_g$isolate == iso2])
+    if (length(g1) == 0 || length(g2) == 0) return(NA)
+    length(intersect(strsplit(g1,"")[[1]], strsplit(g2,"")[[1]])) > 0
+  }
+
+  tested_genes <- names(cld_list)
+  concordance <- do.call(rbind, lapply(tested_genes, function(g) {
+    cg <- cld_all[cld_all$gene == g, ]
+    data.frame(gene = g,
+               low_same         = check_same_group(cg, "WISS47", "JS659"),
+               high_same        = check_same_group(cg, "MNSS6",  "Xtra7"),
+               low_vs_high_diff = !check_same_group(cg, "WISS47", "MNSS6"),
+               stringsAsFactors = FALSE)
+  }))
+
+  nt <- sum(!is.na(concordance$low_same))
+  if (nt > 0) {
+    cat(sprintf("  WISS47 ~ JS659 (Low):     %d / %d (%.1f%%)\n",
+                sum(concordance$low_same, na.rm=T), nt, 100*mean(concordance$low_same, na.rm=T)))
+    cat(sprintf("  MNSS6  ~ Xtra7 (High):    %d / %d (%.1f%%)\n",
+                sum(concordance$high_same, na.rm=T), nt, 100*mean(concordance$high_same, na.rm=T)))
+    cat(sprintf("  Low != High (separated):  %d / %d (%.1f%%)\n",
+                sum(concordance$low_vs_high_diff, na.rm=T), nt,
+                100*mean(concordance$low_vs_high_diff, na.rm=T)))
+  }
+  write.csv(concordance, file.path("isolate_anova_results",
+                                    paste0(out_prefix, "_CLD_concordance.csv")),
+            row.names = FALSE)
+
+  # 6. Planned contrasts
+  cat("\n-- Planned contrasts --\n")
+  first_cld <- cld_list[[1]]
+  emm_order <- as.character(first_cld$isolate)
+  cat("  emmeans isolate order:", paste(emm_order, collapse=", "), "\n")
+
+  mk <- function(weights) {
+    vec <- rep(0, length(emm_order))
+    for (nm in names(weights)) {
+      idx <- which(emm_order == nm)
+      if (length(idx)==1) vec[idx] <- weights[[nm]]
+    }
+    vec
+  }
+  con_defs <- list(
+    "High vs Low" = mk(list(WISS47=-0.5, JS659=-0.5, MNSS6=0.5, Xtra7=0.5)),
+    "SSPotter vs BN172" = mk(list(BN172=-1, SSPotter=1)),
+    "Specialists vs Generalists" = mk(list(WISS47=-0.25, JS659=-0.25,
+                                            MNSS6=-0.25, Xtra7=-0.25,
+                                            BN172=0.5, SSPotter=0.5))
+  )
+
+  planned_list <- list()
+  con_errors <- 0
+  for (g in tested_genes) {
+    ok <- tryCatch({
+      df  <- data.frame(expr = expr_mat[g, ], meta)
+      gene_formula <- as.formula(paste("expr ~", model_formula_str))
+      fit <- lm(gene_formula, data = df)
+      emm <- emmeans(fit, ~ isolate)
+      con_df <- as.data.frame(summary(contrast(emm, con_defs)))
+      con_df$gene <- g
+      planned_list[[g]] <<- con_df
+      TRUE
+    }, error = function(e) { con_errors <<- con_errors + 1; FALSE })
+  }
+  if (con_errors > 0) cat(sprintf("  %d contrast errors\n", con_errors))
+
+  if (length(planned_list) > 0) {
+    planned_all <- do.call(rbind, planned_list)
+    planned_all$padj <- p.adjust(planned_all$p.value, method = "BH")
+    write.csv(planned_all, file.path("isolate_anova_results",
+                                      paste0(out_prefix, "_planned_contrasts.csv")),
+              row.names = FALSE)
+    for (ct in unique(planned_all$contrast)) {
+      sub <- planned_all[planned_all$contrast == ct, ]
+      cat(sprintf("  %-30s %d / %d sig\n", ct, sum(sub$padj<0.05, na.rm=T), nrow(sub)))
+    }
+  } else {
+    planned_all <- NULL
+    cat("  All contrasts failed.\n")
+  }
+
+  list(pergene = pergene, perm = perm_res,
+       pairwise = pairwise_all, cld_all = cld_all,
+       concordance = concordance, planned = planned_all)
+}
+```
+
+
+```{r define-viz-functions}
+plot_isolate_heatmap <- function(vst_obj, pergene, title_str,
+                                  n_top = 200, cluster_cols = TRUE) {
+  if (is.null(pergene) || nrow(pergene) == 0) {
+    cat("  No results for heatmap.\n"); return(invisible(NULL))
+  }
+  sig <- pergene %>% filter(padj_isolate < 0.05) %>% arrange(padj_isolate) %>% head(n_top)
+  genes <- intersect(sig$gene, rownames(assay(vst_obj)))
+  if (length(genes) < 5) {
+    cat("  <5 significant genes -- skipping heatmap.\n"); return(invisible(NULL))
+  }
+  mat <- t(scale(t(assay(vst_obj)[genes, ])))
+  ann <- data.frame(Timepoint  = vst_obj$timepoint,
+                    Isolate    = vst_obj$isolate,
+                    Aggr_group = vst_obj$aggr_group,
+                    row.names  = colnames(mat))
+  ann_colors <- list(
+    Timepoint  = tp_colors[levels(droplevels(ann$Timepoint))],
+    Isolate    = isolate_colors[levels(droplevels(ann$Isolate))],
+    Aggr_group = aggr_colors[levels(droplevels(ann$Aggr_group))])
+  iso_order <- c("WISS47","JS659","MNSS6","Xtra7","BN172","SSPotter")
+  co <- order(match(ann$Isolate, iso_order), match(ann$Timepoint, c("24h","48h","96h")))
+  pheatmap(mat[, co], annotation_col = ann[co,,drop=FALSE],
+           annotation_colors = ann_colors, show_rownames = FALSE,
+           show_colnames = TRUE, cluster_rows = TRUE, cluster_cols = cluster_cols,
+           color = colorRampPalette(c("blue","white","red"))(100),
+           breaks = seq(-2,2,length.out=101), main = title_str,
+           fontsize_row = 5, fontsize_col = 7)
+}
+
+plot_sig_bar <- function(pergene, title_str) {
+  if (is.null(pergene) || nrow(pergene) == 0) return(ggplot() + theme_void())
+  df <- data.frame(
+    Factor = factor(c("Isolate","Timepoint","Block"), levels=c("Isolate","Timepoint","Block")),
+    n_sig  = c(sum(pergene$padj_isolate<0.05,na.rm=T),
+               sum(pergene$padj_timepoint<0.05,na.rm=T),
+               sum(pergene$padj_block<0.05,na.rm=T)))
+  ggplot(df, aes(x=Factor, y=n_sig, fill=Factor)) +
+    geom_col(alpha=0.85) + geom_text(aes(label=n_sig), vjust=-0.5, size=5) +
+    scale_fill_manual(values=c("#1f77b4","#FFD700","#999999")) +
+    labs(title=title_str, y="Sig genes (padj<0.05)", x="") +
+    theme_bw(base_size=14) + theme(legend.position="none")
+}
+
+plot_pval_histograms <- function(pergene, title_str) {
+  if (is.null(pergene) || nrow(pergene)==0) return(invisible(NULL))
+  par(mfrow=c(1,3))
+  hist(pergene$p_isolate,   breaks=50, col="#1f77b4", main=paste(title_str,"Isolate"),   xlab="p")
+  hist(pergene$p_timepoint, breaks=50, col="#FFD700",  main=paste(title_str,"Timepoint"), xlab="p")
+  hist(pergene$p_block,     breaks=50, col="#999999",  main=paste(title_str,"Block"),     xlab="p")
+  par(mfrow=c(1,1))
+}
+
+plot_planned_volcano <- function(planned_df, contrast_name, title_str) {
+  if (is.null(planned_df) || nrow(planned_df)==0)
+    return(ggplot() + labs(title=paste(title_str,"no data")) + theme_void())
+  sub <- planned_df[planned_df$contrast==contrast_name,]
+  if (nrow(sub)==0) return(ggplot()+theme_void())
+  sub$sig <- ifelse(sub$padj<0.05,"Sig","NS")
+  ggplot(sub, aes(x=estimate, y=-log10(padj), color=sig)) +
+    geom_point(alpha=0.6, size=2) +
+    scale_color_manual(values=c(Sig="red",NS="grey60")) +
+    geom_hline(yintercept=-log10(0.05), linetype="dashed") +
+    labs(title=paste(title_str,contrast_name), x="Estimate", y="-log10(padj)") +
+    theme_bw(base_size=13) + theme(legend.position="none")
+}
+```
+
+
+# A. Pathogen Genes on Soybean
+
+```{r anova-path-soy}
+res_path_soy <- run_isolate_anova(vst_soy_pathogen, "Pathogen - Soybean", "pathogen_soybean")
+```
+
+```{r viz-path-soy-bar, fig.height=4}
+print(plot_sig_bar(res_path_soy$pergene, "Pathogen on Soybean"))
+```
+
+```{r viz-path-soy-pval, fig.height=4}
+plot_pval_histograms(res_path_soy$pergene, "Path-Soy")
+```
+
+```{r viz-path-soy-heatmap, fig.height=10}
+plot_isolate_heatmap(vst_soy_pathogen, res_path_soy$pergene,
+                     "Pathogen on Soybean - Isolate DEGs (clustered)", n_top=200, cluster_cols=TRUE)
+```
+
+```{r viz-path-soy-heatmap2, fig.height=10}
+plot_isolate_heatmap(vst_soy_pathogen, res_path_soy$pergene,
+                     "Pathogen on Soybean - Ordered by Isolate", n_top=200, cluster_cols=FALSE)
+```
+
+```{r viz-path-soy-con, fig.height=5, fig.width=14}
+if (!is.null(res_path_soy$planned)) {
+  grid.arrange(
+    plot_planned_volcano(res_path_soy$planned, "High vs Low", "Path-Soy"),
+    plot_planned_volcano(res_path_soy$planned, "SSPotter vs BN172", "Path-Soy"),
+    plot_planned_volcano(res_path_soy$planned, "Specialists vs Generalists", "Path-Soy"),
+    nrow=1)
+}
+```
+
+
+# B. Pathogen Genes on Sunflower
+
+```{r anova-path-sun}
+res_path_sun <- run_isolate_anova(vst_sun_pathogen, "Pathogen - Sunflower", "pathogen_sunflower")
+```
+
+```{r viz-path-sun-bar, fig.height=4}
+print(plot_sig_bar(res_path_sun$pergene, "Pathogen on Sunflower"))
+```
+
+```{r viz-path-sun-pval, fig.height=4}
+plot_pval_histograms(res_path_sun$pergene, "Path-Sun")
+```
+
+```{r viz-path-sun-heatmap, fig.height=10}
+plot_isolate_heatmap(vst_sun_pathogen, res_path_sun$pergene,
+                     "Pathogen on Sunflower - Isolate DEGs (clustered)", n_top=200, cluster_cols=TRUE)
+```
+
+```{r viz-path-sun-heatmap2, fig.height=10}
+plot_isolate_heatmap(vst_sun_pathogen, res_path_sun$pergene,
+                     "Pathogen on Sunflower - Ordered by Isolate", n_top=200, cluster_cols=FALSE)
+```
+
+```{r viz-path-sun-con, fig.height=5, fig.width=14}
+if (!is.null(res_path_sun$planned)) {
+  grid.arrange(
+    plot_planned_volcano(res_path_sun$planned, "High vs Low", "Path-Sun"),
+    plot_planned_volcano(res_path_sun$planned, "SSPotter vs BN172", "Path-Sun"),
+    plot_planned_volcano(res_path_sun$planned, "Specialists vs Generalists", "Path-Sun"),
+    nrow=1)
+}
+```
+
+
+# C. Soybean Host Genes
+
+```{r anova-host-soy}
+res_host_soy <- run_isolate_anova(vst_soy_host, "Soybean host genes", "host_soybean")
+```
+
+```{r viz-host-soy-bar, fig.height=4}
+print(plot_sig_bar(res_host_soy$pergene, "Soybean Host"))
+```
+
+```{r viz-host-soy-pval, fig.height=4}
+plot_pval_histograms(res_host_soy$pergene, "Host-Soy")
+```
+
+```{r viz-host-soy-heatmap, fig.height=10}
+plot_isolate_heatmap(vst_soy_host, res_host_soy$pergene,
+                     "Soybean Host - Isolate DEGs (clustered)", n_top=200, cluster_cols=TRUE)
+```
+
+```{r viz-host-soy-heatmap2, fig.height=10}
+plot_isolate_heatmap(vst_soy_host, res_host_soy$pergene,
+                     "Soybean Host - Ordered by Isolate", n_top=200, cluster_cols=FALSE)
+```
+
+```{r viz-host-soy-con, fig.height=5, fig.width=14}
+if (!is.null(res_host_soy$planned)) {
+  grid.arrange(
+    plot_planned_volcano(res_host_soy$planned, "High vs Low", "Host-Soy"),
+    plot_planned_volcano(res_host_soy$planned, "SSPotter vs BN172", "Host-Soy"),
+    plot_planned_volcano(res_host_soy$planned, "Specialists vs Generalists", "Host-Soy"),
+    nrow=1)
+}
+```
+
+
+# D. Sunflower Host Genes
+
+```{r anova-host-sun}
+res_host_sun <- run_isolate_anova(vst_sun_host, "Sunflower host genes", "host_sunflower")
+```
+
+```{r viz-host-sun-bar, fig.height=4}
+print(plot_sig_bar(res_host_sun$pergene, "Sunflower Host"))
+```
+
+```{r viz-host-sun-pval, fig.height=4}
+plot_pval_histograms(res_host_sun$pergene, "Host-Sun")
+```
+
+```{r viz-host-sun-heatmap, fig.height=10}
+plot_isolate_heatmap(vst_sun_host, res_host_sun$pergene,
+                     "Sunflower Host - Isolate DEGs (clustered)", n_top=200, cluster_cols=TRUE)
+```
+
+```{r viz-host-sun-heatmap2, fig.height=10}
+plot_isolate_heatmap(vst_sun_host, res_host_sun$pergene,
+                     "Sunflower Host - Ordered by Isolate", n_top=200, cluster_cols=FALSE)
+```
+
+```{r viz-host-sun-con, fig.height=5, fig.width=14}
+if (!is.null(res_host_sun$planned)) {
+  grid.arrange(
+    plot_planned_volcano(res_host_sun$planned, "High vs Low", "Host-Sun"),
+    plot_planned_volcano(res_host_sun$planned, "SSPotter vs BN172", "Host-Sun"),
+    plot_planned_volcano(res_host_sun$planned, "Specialists vs Generalists", "Host-Sun"),
+    nrow=1)
+}
+```
+
+
+# Grand Summary
+
+```{r grand-summary, fig.width=14, fig.height=6}
+cat(paste(rep("=",80), collapse=""), "\n")
+cat("HYPOTHESIS CONFIRMATION SUMMARY\n")
+cat(paste(rep("=",80), collapse=""), "\n\n")
+
+datasets <- list("Pathogen-Soybean"   = res_path_soy,
+                 "Pathogen-Sunflower" = res_path_sun,
+                 "Host-Soybean"       = res_host_soy,
+                 "Host-Sunflower"     = res_host_sun)
+summary_rows <- list()
+
+for (nm in names(datasets)) {
+  res <- datasets[[nm]]; pg <- res$pergene; conc <- res$concordance; plan <- res$planned
+  if (is.null(pg) || nrow(pg)==0) { cat(sprintf("-- %s -- SKIPPED\n\n",nm)); next }
+
+  n_iso <- sum(pg$padj_isolate<0.05, na.rm=T)
+  n_blk <- sum(pg$padj_block<0.05, na.rm=T)
+  nt    <- nrow(pg)
+
+  cat(sprintf("-- %s --\n", nm))
+  cat(sprintf("  Isolate DEGs: %d/%d (%.1f%%)\n", n_iso, nt, 100*n_iso/nt))
+  cat(sprintf("  Block DEGs:   %d/%d (%.1f%%)\n", n_blk, nt, 100*n_blk/nt))
+
+  if (!is.null(conc) && nrow(conc)>0 && sum(!is.na(conc$low_same))>0) {
+    pl <- 100*mean(conc$low_same,na.rm=T); ph <- 100*mean(conc$high_same,na.rm=T)
+    pd <- 100*mean(conc$low_vs_high_diff,na.rm=T)
+    cat(sprintf("  WISS47~JS659 (Low):  %.1f%%\n", pl))
+    cat(sprintf("  MNSS6~Xtra7 (High):  %.1f%%\n", ph))
+    cat(sprintf("  Low!=High:           %.1f%%\n", pd))
+    summary_rows[[nm]] <- data.frame(Dataset=nm, Isolate_DEGs=n_iso, Block_DEGs=n_blk,
+                                      Pct_Low_same=round(pl,1), Pct_High_same=round(ph,1),
+                                      Pct_LowVsHigh_diff=round(pd,1))
+  }
+
+  if (!is.null(plan) && nrow(plan)>0) {
+    cat("  Planned contrasts (padj<0.05):\n")
+    for (ct in unique(plan$contrast)) {
+      sub <- plan[plan$contrast==ct,]
+      cat(sprintf("    %-30s %d/%d\n", ct, sum(sub$padj<0.05,na.rm=T), nrow(sub)))
+    }
+  }
+  cat("\n")
+}
+
+if (length(summary_rows)>0) {
+  sdf <- do.call(rbind, summary_rows)
+  cat("\n-- Concordance Summary --\n"); print(sdf, row.names=FALSE)
+  write.csv(sdf, "isolate_anova_results/hypothesis_concordance_summary.csv", row.names=FALSE)
+}
+
+# Combined bar
+bar_data <- do.call(rbind, lapply(names(datasets), function(nm) {
+  pg <- datasets[[nm]]$pergene
+  if (is.null(pg)||nrow(pg)==0) return(NULL)
+  data.frame(Dataset=nm,
+             Factor=c("Isolate","Timepoint","Block"),
+             n_sig=c(sum(pg$padj_isolate<0.05,na.rm=T),
+                     sum(pg$padj_timepoint<0.05,na.rm=T),
+                     sum(pg$padj_block<0.05,na.rm=T)))
+}))
+if (!is.null(bar_data) && nrow(bar_data)>0) {
+  bar_data$Factor  <- factor(bar_data$Factor, levels=c("Isolate","Timepoint","Block"))
+  bar_data$Dataset <- factor(bar_data$Dataset, levels=names(datasets))
+  print(ggplot(bar_data, aes(x=Factor, y=n_sig, fill=Dataset)) +
+    geom_col(position=position_dodge(0.8), alpha=0.85, width=0.7) +
+    geom_text(aes(label=n_sig), position=position_dodge(0.8), vjust=-0.4, size=3) +
+    scale_fill_manual(values=c("#2ca02c","#17becf","#ffcb21","#5e3a04")) +
+    labs(title="Significant Genes per Factor", y="Sig genes (padj<0.05)", x="") +
+    theme_bw(base_size=14) + theme(legend.position="top"))
+}
+```
+
+# Output File Index
+
+```{r file-index}
+cat("All files in isolate_anova_results/:\n\n")
+cat("Per dataset (x4):\n")
+cat("  *_PERMANOVA.csv         - whole-transcriptome variance\n")
+cat("  *_pergene_ANOVA.csv     - per-gene F & p\n")
+cat("  *_pairwise_isolate.csv  - Tukey pairwise\n")
+cat("  *_CLD_isolate.csv       - compact letter display\n")
+cat("  *_CLD_concordance.csv   - hypothesis match check\n")
+cat("  *_planned_contrasts.csv - High vs Low, etc.\n\n")
+cat("Summary:\n")
+cat("  hypothesis_concordance_summary.csv\n")
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```

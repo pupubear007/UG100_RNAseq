@@ -1,0 +1,600 @@
+---
+title: "Host GO Enrichment Analysis - All Timepoints (Based on Proven Approach)"
+author: "RNA-seq Analysis"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  warning = FALSE, 
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 8
+)
+```
+
+# Overview
+
+This analysis adapts your **proven successful approach** to analyze host GO enrichment across all timepoints (24h, 48h, 96h) using the same gene ID fixes and annotation files that worked in your previous analysis.
+
+**Key elements from your successful analysis:**
+- ✅ Gene ID fix: Remove `Ha_`/`Gm_` prefix + `.1/.2/.3` transcript suffix
+- ✅ Phytozome annotation files with `locusName` and `GO` columns
+- ✅ Coverage verification after ID fix
+- ✅ `enricher()` function with `term2gene` mapping
+
+---
+
+# 1. Setup and Load Libraries
+
+```{r load_libraries}
+library(clusterProfiler)
+library(enrichplot)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(pheatmap)
+library(RColorBrewer)
+library(cowplot)
+
+theme_set(theme_bw(base_size = 12))
+cat("✓ Libraries loaded successfully\n")
+```
+
+```{r configuration}
+# ===== CONFIGURATION - UPDATE THESE PATHS =====
+
+# Choose organism: "Ha" for Helianthus, "Gm" for Glycine max
+ORGANISM <- "Ha"  # Change to "Gm" for soybean analysis
+
+# Set working directory - UPDATE THIS PATH
+# TODO: set the working directory to the folder containing your STAR count matrices and DEG CSVs
+# setwd("/path/to/your/STAR/output")
+
+# Define file paths based on organism
+if(ORGANISM == "Ha") {
+  organism_name <- "Helianthus annuus"
+  deg_file_pattern <- "./Ha_host_aggressive_vs_low_DEGs_%s.csv"
+  annotation_file <- "./Hannuus_494_r1.2.P14.annotation_info.txt"
+  output_prefix <- "Ha_host"
+} else if(ORGANISM == "Gm") {
+  organism_name <- "Glycine max"
+  deg_file_pattern <- "./Gm_host_aggressive_vs_low_DEGs_%s.csv"
+  annotation_file <- "./Gmax_880_Wm82.a6.v1.P14.annotation_info.txt"
+  output_prefix <- "Gm_host"
+}
+
+timepoints <- c("24h", "48h", "96h")
+
+cat("=== ANALYSIS CONFIGURATION ===\n")
+cat("Organism:", organism_name, "\n")
+cat("Annotation file:", annotation_file, "\n")
+cat("Timepoints:", paste(timepoints, collapse = ", "), "\n\n")
+
+# Create output directories
+dir.create(paste0(output_prefix, "_enrichment_results"), showWarnings = FALSE)
+dir.create("plots", showWarnings = FALSE)
+```
+
+---
+
+# 2. Load and Check Annotation (Your Proven Approach)
+
+```{r load_annotation}
+cat("=== LOADING ANNOTATION (PROVEN APPROACH) ===\n\n")
+
+if(file.exists(annotation_file)) {
+  cat("✓ Loading Phytozome annotation...\n")
+  
+  # Read annotation using your proven approach
+  annot <- read.delim(annotation_file, header = TRUE, stringsAsFactors = FALSE)
+  
+  cat("File dimensions:\n")
+  cat("  Rows:", nrow(annot), "\n")
+  cat("  Columns:", ncol(annot), "\n")
+  cat("  Column names:", paste(colnames(annot), collapse = ", "), "\n\n")
+  
+  # Extract GO terms using your exact approach
+  go_mapping <- annot %>%
+    select(locusName, GO) %>%
+    filter(!is.na(GO) & GO != "" & GO != "none") %>%
+    separate_rows(GO, sep = ",") %>%
+    mutate(GO = trimws(GO)) %>%
+    filter(grepl("^GO:", GO))
+  
+  # Create term2gene dataframe
+  term2gene <- go_mapping %>%
+    select(GO, locusName) %>%
+    distinct()
+  
+  cat("✓ Annotation processing complete:\n")
+  cat("  Genes with GO annotation:", length(unique(term2gene$locusName)), "\n")
+  cat("  Total gene-GO pairs:", nrow(term2gene), "\n\n")
+  
+  annotation_available <- TRUE
+  
+} else {
+  cat("❌ Annotation file not found:", annotation_file, "\n")
+  cat("Please ensure the Phytozome annotation file is in the working directory.\n")
+  
+  annotation_available <- FALSE
+  term2gene <- data.frame(GO = character(), locusName = character())
+}
+```
+
+---
+
+# 3. Gene ID Fixing Function (Your Proven Approach)
+
+```{r gene_id_functions}
+cat("=== GENE ID FIXING (YOUR PROVEN APPROACH) ===\n\n")
+
+# Exact same gene ID fix that worked in your successful analysis
+fix_gene_ids_proven_approach <- function(original_ids, organism) {
+
+  cat(sprintf("Applying gene ID fix for %s...\n", organism))
+
+  # Strip optional Ha_/Gm_ prefix (present in Salmon-era IDs, absent in STAR-era)
+  if(organism == "Ha") {
+    step1 <- gsub("^Ha_", "", original_ids)
+    # Helianthus locus pattern: HanXRQChr01g0000011 (then anything trailing — .1,
+    # .Han412v2.x.y, etc.) — keep only the locus part.
+    fixed <- sub("^(HanXRQChr[^.]+).*$", "\\1", step1)
+  } else if(organism == "Gm") {
+    step1 <- gsub("^Gm_", "", original_ids)
+    # Soybean locus pattern: Glyma.<chr>.<locus>  (e.g. Glyma.06G169500), then
+    # anything trailing (.1, .Wm82.a6.v1, etc.) — keep only the locus part.
+    fixed <- sub("^(Glyma\\.[^.]+).*$", "\\1", step1)
+  }
+
+  # Show transformation examples
+  cat("\nID transformation examples:\n")
+  for(i in 1:min(3, length(original_ids))) {
+    cat(sprintf("  Original:  %s\n", original_ids[i]))
+    cat(sprintf("  Final:     %s\n\n", fixed[i]))
+  }
+
+  # Sanity check: how many IDs converted to a non-empty result that still
+  # looks like the expected locus pattern?
+  if(organism == "Gm") {
+    n_ok <- sum(grepl("^Glyma\\.", fixed))
+  } else {
+    n_ok <- sum(grepl("^HanXRQChr", fixed))
+  }
+  cat(sprintf("Locus IDs recovered: %d / %d (%.1f%%)\n",
+              n_ok, length(fixed), 100 * n_ok / length(fixed)))
+
+  return(fixed)
+}
+
+cat("✓ Gene ID fixing function defined\n")
+```
+
+---
+
+# 4. Process Each Timepoint
+
+```{r process_timepoints, results='asis', fig.width=12, fig.height=8}
+cat("=== PROCESSING ALL TIMEPOINTS ===\n\n")
+
+# Storage for all results
+all_results <- list()
+
+for (tp in timepoints) {
+  
+  cat("\n\n---\n\n")
+  cat(sprintf("## %s Analysis\n\n", tp))
+  
+  cat(sprintf("=== PROCESSING TIMEPOINT: %s ===\n\n", tp))
+  
+  # Load DEG file
+  deg_file <- sprintf(deg_file_pattern, tp)
+  
+  if(!file.exists(deg_file)) {
+    cat(sprintf("❌ DEG file not found: %s — SKIPPING\n", deg_file))
+    next
+  }
+  
+  host_degs <- read.csv(deg_file, stringsAsFactors = FALSE, row.names = 1)
+  cat(sprintf("✓ Loaded %d DEGs from %s\n", nrow(host_degs), basename(deg_file)))
+  
+  # Store original gene IDs
+  original_gene_ids <- rownames(host_degs)
+  
+  # Apply proven gene ID fix
+  fixed_gene_ids <- fix_gene_ids_proven_approach(original_gene_ids, ORGANISM)
+  
+  # Create gene lists
+  host_all <- unique(fixed_gene_ids)
+  
+  # Identify log fold change column
+  lfc_col <- grep("log.*fold|lfc", colnames(host_degs), ignore.case = TRUE, value = TRUE)[1]
+  
+  if(is.na(lfc_col)) {
+    cat("❌ No log fold change column found — skipping\n")
+    next
+  }
+  
+  # Separate up/down regulated
+  upregulated_idx <- host_degs[[lfc_col]] > 0
+  downregulated_idx <- host_degs[[lfc_col]] < 0
+  
+  host_up <- unique(fixed_gene_ids[upregulated_idx])
+  host_down <- unique(fixed_gene_ids[downregulated_idx])
+  
+  cat(sprintf("Gene counts after fix:\n"))
+  cat(sprintf("  Total unique genes: %d\n", length(host_all)))
+  cat(sprintf("  Up-regulated: %d\n", length(host_up)))
+  cat(sprintf("  Down-regulated: %d\n\n", length(host_down)))
+  
+  # Check annotation coverage using proven approach
+  if(annotation_available) {
+    matched_genes <- intersect(host_all, unique(term2gene$locusName))
+    coverage <- round(100 * length(matched_genes) / length(host_all), 1)
+    
+    cat("=== COVERAGE CHECK (PROVEN APPROACH) ===\n")
+    cat(sprintf("  Unique DEGs: %d\n", length(host_all)))
+    cat(sprintf("  Genes with GO annotation: %d\n", length(matched_genes)))
+    cat(sprintf("  Coverage: %.1f%%\n\n", coverage))
+    
+    if(coverage > 10) {
+      cat("✓ Sufficient coverage for enrichment analysis!\n\n")
+      proceed_with_enrichment <- TRUE
+    } else {
+      cat("⚠️ Low coverage — enrichment may have limited power\n\n")
+      proceed_with_enrichment <- FALSE
+    }
+  } else {
+    coverage <- 0
+    proceed_with_enrichment <- FALSE
+  }
+  
+  # Run GO enrichment if coverage is good
+  ego_all <- NULL
+  ego_up <- NULL
+  ego_down <- NULL
+  
+  if(proceed_with_enrichment) {
+    
+    cat("Running GO enrichment analysis...\n")
+    
+    # All DEGs
+    if(length(host_all) >= 10) {
+      tryCatch({
+        ego_all <- enricher(
+          gene = host_all,
+          TERM2GENE = term2gene,
+          pvalueCutoff = 0.05,
+          pAdjustMethod = "BH",
+          qvalueCutoff = 0.2,
+          minGSSize = 10,
+          maxGSSize = 500
+        )
+        
+        if(!is.null(ego_all) && nrow(ego_all@result) > 0) {
+          cat(sprintf("  ✓ All DEGs: %d enriched GO terms\n", nrow(ego_all@result)))
+        } else {
+          cat("  ⚠️ All DEGs: No enriched terms found\n")
+        }
+      }, error = function(e) {
+        cat("  ❌ All DEGs enrichment failed:", e$message, "\n")
+      })
+    }
+    
+    # Up-regulated DEGs
+    if(length(host_up) >= 10) {
+      tryCatch({
+        ego_up <- enricher(
+          gene = host_up,
+          TERM2GENE = term2gene,
+          pvalueCutoff = 0.05,
+          pAdjustMethod = "BH", 
+          qvalueCutoff = 0.2,
+          minGSSize = 10,
+          maxGSSize = 500
+        )
+        
+        if(!is.null(ego_up) && nrow(ego_up@result) > 0) {
+          cat(sprintf("  ✓ Up-regulated: %d enriched GO terms\n", nrow(ego_up@result)))
+        } else {
+          cat("  ⚠️ Up-regulated: No enriched terms found\n")
+        }
+      }, error = function(e) {
+        cat("  ❌ Up-regulated enrichment failed:", e$message, "\n")
+      })
+    }
+    
+    # Down-regulated DEGs  
+    if(length(host_down) >= 10) {
+      tryCatch({
+        ego_down <- enricher(
+          gene = host_down,
+          TERM2GENE = term2gene,
+          pvalueCutoff = 0.05,
+          pAdjustMethod = "BH",
+          qvalueCutoff = 0.2,
+          minGSSize = 10,
+          maxGSSize = 500
+        )
+        
+        if(!is.null(ego_down) && nrow(ego_down@result) > 0) {
+          cat(sprintf("  ✓ Down-regulated: %d enriched GO terms\n", nrow(ego_down@result)))
+        } else {
+          cat("  ⚠️ Down-regulated: No enriched terms found\n")
+        }
+      }, error = function(e) {
+        cat("  ❌ Down-regulated enrichment failed:", e$message, "\n")
+      })
+    }
+  }
+  
+  # Store results
+  all_results[[tp]] <- list(
+    degs = host_degs,
+    original_ids = original_gene_ids,
+    fixed_ids = fixed_gene_ids,
+    host_all = host_all,
+    host_up = host_up,
+    host_down = host_down,
+    coverage = coverage,
+    ego_all = ego_all,
+    ego_up = ego_up,
+    ego_down = ego_down
+  )
+  
+  # Create plots if enrichment successful
+  if(!is.null(ego_all) && nrow(ego_all@result) > 0) {
+    
+    # Dot plot for all DEGs
+    p1 <- dotplot(ego_all, showCategory = 20, font.size = 10) +
+      ggtitle(paste0(organism_name, " Host DEGs (", tp, ")")) +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+    
+    print(p1)
+    
+    # Save plot
+    ggsave(filename = paste0("plots/", output_prefix, "_dotplot_", tp, ".pdf"), 
+           plot = p1, width = 10, height = 8)
+  }
+  
+  # Up vs Down comparison
+  if(!is.null(ego_up) && !is.null(ego_down)) {
+    if(nrow(ego_up@result) > 0 && nrow(ego_down@result) > 0) {
+      
+      p_up <- dotplot(ego_up, showCategory = 15, font.size = 9) +
+        ggtitle(paste0("Up-regulated (", tp, ")")) +
+        theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+      
+      p_down <- dotplot(ego_down, showCategory = 15, font.size = 9) +
+        ggtitle(paste0("Down-regulated (", tp, ")")) +
+        theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+      
+      p_combined <- plot_grid(p_up, p_down, ncol = 1)
+      print(p_combined)
+      
+      ggsave(filename = paste0("plots/", output_prefix, "_up_down_", tp, ".pdf"), 
+             plot = p_combined, width = 10, height = 12)
+    }
+  }
+  
+  cat(sprintf("\n✓ Timepoint %s analysis complete\n", tp))
+}
+```
+
+---
+
+# 5. Cross-Timepoint Summary
+
+```{r cross_timepoint_summary}
+cat("\n=== CROSS-TIMEPOINT SUMMARY ===\n\n")
+
+if(length(all_results) > 0) {
+  
+  # Create summary table
+  summary_df <- data.frame(
+    Timepoint = character(),
+    Total_DEGs = integer(),
+    Up_regulated = integer(),
+    Down_regulated = integer(),
+    Coverage_pct = numeric(),
+    GO_all = integer(),
+    GO_up = integer(),
+    GO_down = integer(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (tp in names(all_results)) {
+    r <- all_results[[tp]]
+    summary_df <- rbind(summary_df, data.frame(
+      Timepoint = tp,
+      Total_DEGs = length(r$host_all),
+      Up_regulated = length(r$host_up),
+      Down_regulated = length(r$host_down),
+      Coverage_pct = r$coverage,
+      GO_all = ifelse(!is.null(r$ego_all) && nrow(r$ego_all@result) > 0, nrow(r$ego_all@result), 0),
+      GO_up = ifelse(!is.null(r$ego_up) && nrow(r$ego_up@result) > 0, nrow(r$ego_up@result), 0),
+      GO_down = ifelse(!is.null(r$ego_down) && nrow(r$ego_down@result) > 0, nrow(r$ego_down@result), 0),
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  print(summary_df)
+  
+  # Plot summary
+  summary_long <- summary_df %>%
+    select(Timepoint, Up_regulated, Down_regulated) %>%
+    pivot_longer(cols = c(Up_regulated, Down_regulated), 
+                names_to = "Direction", values_to = "Count")
+  
+  p_summary <- ggplot(summary_long, aes(x = Timepoint, y = Count, fill = Direction)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_manual(values = c("Up_regulated" = "red", "Down_regulated" = "blue")) +
+    labs(title = paste(organism_name, "Host Response Across Time"),
+         subtitle = "Number of Differentially Expressed Genes",
+         y = "Number of DEGs") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  print(p_summary)
+  
+  ggsave(paste0("plots/", output_prefix, "_temporal_summary.pdf"), 
+         plot = p_summary, width = 8, height = 6)
+  
+} else {
+  cat("No results to summarize\n")
+}
+```
+
+---
+
+# 6. Save Results
+
+```{r save_results}
+cat("\n=== SAVING RESULTS ===\n\n")
+
+if(length(all_results) > 0) {
+  
+  output_dir <- paste0(output_prefix, "_enrichment_results")
+  
+  for (tp in names(all_results)) {
+    r <- all_results[[tp]]
+    
+    cat(sprintf("--- Saving %s results ---\n", tp))
+    
+    # Save enrichment results
+    if(!is.null(r$ego_all) && nrow(r$ego_all@result) > 0) {
+      fname <- paste0(output_prefix, "_all_DEGs_GO_enrichment_", tp, ".csv")
+      write.csv(r$ego_all@result, file.path(output_dir, fname), row.names = FALSE)
+      cat("  ✓", fname, "\n")
+    }
+    
+    if(!is.null(r$ego_up) && nrow(r$ego_up@result) > 0) {
+      fname <- paste0(output_prefix, "_upregulated_GO_enrichment_", tp, ".csv")
+      write.csv(r$ego_up@result, file.path(output_dir, fname), row.names = FALSE)
+      cat("  ✓", fname, "\n")
+    }
+    
+    if(!is.null(r$ego_down) && nrow(r$ego_down@result) > 0) {
+      fname <- paste0(output_prefix, "_downregulated_GO_enrichment_", tp, ".csv")
+      write.csv(r$ego_down@result, file.path(output_dir, fname), row.names = FALSE)
+      cat("  ✓", fname, "\n")
+    }
+    
+    # Save processed gene lists for web tools
+    writeLines(r$host_all, file.path(output_dir, paste0(output_prefix, "_all_genes_", tp, ".txt")))
+    writeLines(r$host_up, file.path(output_dir, paste0(output_prefix, "_up_genes_", tp, ".txt")))
+    writeLines(r$host_down, file.path(output_dir, paste0(output_prefix, "_down_genes_", tp, ".txt")))
+    cat("  ✓ Gene lists saved\n")
+  }
+  
+  # Save summary
+  write.csv(summary_df, file.path(output_dir, paste0(output_prefix, "_timepoint_summary.csv")), row.names = FALSE)
+  cat("\n✓ Summary saved\n")
+  
+  cat("\nAll results saved to:", output_dir, "\n")
+  
+} else {
+  cat("No results to save\n")
+}
+```
+
+---
+
+# 7. Biological Interpretation
+
+```{r interpretation}
+cat("\n=== BIOLOGICAL INTERPRETATION ===\n\n")
+
+cat(sprintf("Analysis for %s host response to Sclerotinia:\n", organism_name))
+cat(paste(rep("=", nchar(organism_name) + 38), collapse=""), "\n\n")
+
+if(length(all_results) > 0) {
+  
+  for (tp in names(all_results)) {
+    r <- all_results[[tp]]
+    
+    cat(sprintf("--- %s ---\n", tp))
+    cat(sprintf("DEGs: %d (Up: %d, Down: %d)\n", 
+                length(r$host_all), length(r$host_up), length(r$host_down)))
+    cat(sprintf("GO annotation coverage: %.1f%%\n", r$coverage))
+    
+    n_all <- ifelse(!is.null(r$ego_all) && nrow(r$ego_all@result) > 0, nrow(r$ego_all@result), 0)
+    n_up <- ifelse(!is.null(r$ego_up) && nrow(r$ego_up@result) > 0, nrow(r$ego_up@result), 0)
+    n_down <- ifelse(!is.null(r$ego_down) && nrow(r$ego_down@result) > 0, nrow(r$ego_down@result), 0)
+    
+    cat(sprintf("Enriched GO terms: All=%d, Up=%d, Down=%d\n\n", n_all, n_up, n_down))
+    
+    # Show top enriched terms
+    if(!is.null(r$ego_up) && nrow(r$ego_up@result) > 0) {
+      cat("Top up-regulated pathways:\n")
+      top_up <- r$ego_up@result %>% arrange(pvalue) %>% head(3)
+      for(i in 1:nrow(top_up)) {
+        cat(sprintf("  • %s (p=%.2e)\n", top_up$Description[i], top_up$pvalue[i]))
+      }
+      cat("\n")
+    }
+  }
+  
+  cat("KEY INSIGHTS:\n")
+  cat("• Up-regulated genes = Defense responses to pathogen\n")
+  cat("• Down-regulated genes = Suppressed growth/metabolism\n")
+  cat("• Time-course = Progressive infection response\n")
+  cat("• Compare with pathogen analysis for interaction insights\n\n")
+  
+} else {
+  cat("No enrichment results for interpretation\n")
+}
+```
+
+---
+
+# 8. Next Steps
+
+```{r next_steps}
+cat("=== RECOMMENDED NEXT STEPS ===\n\n")
+
+cat("IMMEDIATE ACTIONS:\n")
+cat("1. Run same analysis for the other organism (change ORGANISM variable)\n")
+cat("2. Compare results between Helianthus and Glycine max\n")
+cat("3. Use gene lists with web tools (g:Profiler, AgriGO) for additional insights\n\n")
+
+cat("WEB ENRICHMENT TOOLS:\n")
+cat("• g:Profiler: https://biit.cs.ut.ee/gprofiler/\n")
+cat("• AgriGO v2.0: http://systemsbiology.cau.edu.cn/agriGOv2/\n")
+cat("• ShinyGO: http://bioinformatics.sdstate.edu/go/\n\n")
+
+cat("COMPARATIVE ANALYSIS:\n")
+cat("• Identify conserved defense mechanisms across hosts\n")
+cat("• Find host-specific response patterns\n") 
+cat("• Link temporal patterns to infection progression\n\n")
+
+if(length(all_results) > 0) {
+  total_enriched <- sum(sapply(all_results, function(x) {
+    ifelse(!is.null(x$ego_all) && nrow(x$ego_all@result) > 0, nrow(x$ego_all@result), 0)
+  }))
+  cat(sprintf("✓ SUCCESS: %d enriched GO terms found across timepoints\n", total_enriched))
+} else {
+  cat("⚠️ Consider using web tools if local enrichment had low coverage\n")
+}
+```
+
+---
+
+# Session Information
+
+```{r session_info}
+sessionInfo()
+```
+
+---
+
+**Analysis complete!** This approach uses your exact successful gene ID fixing and annotation processing methods, extended to work with individual timepoint files.

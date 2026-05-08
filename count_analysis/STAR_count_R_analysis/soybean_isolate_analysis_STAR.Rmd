@@ -1,0 +1,607 @@
+---
+title: "Soybean-Sclerotinia Isolate Comparison Analysis (STAR)"
+author: "Analysis by wan00965"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, 
+                      fig.width = 12, fig.height = 8)
+```
+
+# Overview
+
+This notebook analyzes soybean (Williams 82) responses to different **Sclerotinia sclerotiorum** isolates with varying aggressiveness levels.
+
+**Isolate Categories:**
+- **Low aggressive:** WISS47, JS659
+- **High aggressive:** Xtra7, MNSS6
+- **Soybean-specific:** SsPotter
+- **Sunflower-specific:** BN172
+
+**Timepoints:** NC (negative control), 24h, 48h, 96h
+
+# Setup
+
+## Install Required Packages (Run Once)
+
+```{r install-packages, eval=FALSE}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install(c("DESeq2", "ComplexHeatmap", "EnhancedVolcano"))
+install.packages(c("ggplot2", "pheatmap", "RColorBrewer", "dplyr", "tidyr", "gridExtra"))
+```
+
+## Load Libraries
+
+```{r load-libraries}
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(RColorBrewer)
+library(dplyr)
+library(tidyr)
+library(ComplexHeatmap)
+library(EnhancedVolcano)
+library(gridExtra)
+
+cat("All libraries loaded successfully!\n")
+```
+
+## Set Working Directory
+
+```{r set-directory}
+# Update this path to where your count files are located
+# TODO: set the working directory to the folder containing your STAR count matrices and DEG CSVs
+# setwd("/path/to/your/STAR/output")
+
+# Verify we're in the right place
+list.files(pattern = "soybean.*STAR")
+```
+
+# Load Data
+
+```{r load-data}
+# Load count matrices
+counts_all <- read.table("soybean_count_matrix_STAR.txt", 
+                         header = TRUE, row.names = 1, check.names = FALSE)
+counts_host <- read.table("soybean_host_only_STAR.txt", 
+                          header = TRUE, row.names = 1, check.names = FALSE)
+counts_pathogen <- read.table("pathogen_soybean_STAR.txt", 
+                              header = TRUE, row.names = 1, check.names = FALSE)
+
+cat(sprintf("Total genes: %d\n", nrow(counts_all)))
+cat(sprintf("Host genes (Gm_): %d\n", nrow(counts_host)))
+cat(sprintf("Pathogen genes (Ss_): %d\n", nrow(counts_pathogen)))
+cat(sprintf("Samples: %d\n", ncol(counts_all)))
+```
+
+## Create Metadata with Isolate Information
+
+```{r create-metadata}
+# Sample name pattern: timepoint_replicate_species_isolate
+# Examples: "0_1_Gm_NC", "24_1_Gm_BN172", "48_2_Gm_MNSS6"
+
+sample_names <- colnames(counts_all)
+
+metadata <- data.frame(
+  sample = sample_names,
+  row.names = sample_names,
+  stringsAsFactors = FALSE
+)
+
+# Extract timepoint (first number)
+metadata$timepoint_num <- sapply(strsplit(sample_names, "_"), `[`, 1)
+metadata$replicate <- sapply(strsplit(sample_names, "_"), `[`, 2)
+metadata$species <- sapply(strsplit(sample_names, "_"), `[`, 3)
+
+# Extract isolate name (last element)
+metadata$isolate <- sapply(strsplit(sample_names, "_"), function(x) x[length(x)])
+
+# Create timepoint with hours
+metadata$timepoint <- sapply(sample_names, function(x) {
+  parts <- strsplit(x, "_")[[1]]
+  if(parts[length(parts)] == "NC") {
+    return("NC")
+  } else {
+    return(paste0(parts[1], "h"))
+  }
+})
+
+# Assign aggressiveness categories
+metadata$aggressiveness <- sapply(metadata$isolate, function(iso) {
+  if(iso == "NC") return("Control")
+  if(iso %in% c("WISS47", "JS659")) return("Low")
+  if(iso %in% c("Xtra7", "MNSS6")) return("High")
+  if(iso == "SSPotter") return("Soy-specific")
+  if(iso == "BN172") return("Sun-specific")
+  return("Unknown")
+})
+
+# Convert to factors with proper order
+metadata$timepoint <- factor(metadata$timepoint, levels = c("NC", "24h", "48h", "96h"))
+metadata$isolate <- factor(metadata$isolate)
+metadata$aggressiveness <- factor(metadata$aggressiveness, 
+                                  levels = c("Control", "Low", "High", 
+                                            "Soy-specific", "Sun-specific"))
+
+# Display summary
+cat("\n=== METADATA SUMMARY ===\n")
+print(head(metadata, 10))
+
+cat("\n=== Samples per timepoint ===\n")
+print(table(metadata$timepoint, useNA = "always"))
+
+cat("\n=== Samples per isolate ===\n")
+print(table(metadata$isolate, useNA = "always"))
+
+cat("\n=== Samples per aggressiveness category ===\n")
+print(table(metadata$aggressiveness, useNA = "always"))
+
+cat("\n=== Isolates by timepoint ===\n")
+print(table(metadata$timepoint, metadata$isolate))
+```
+
+# Quality Control
+
+## Library Sizes
+
+```{r qc-library-sizes}
+lib_sizes <- colSums(counts_host)
+
+lib_df <- data.frame(
+  sample = names(lib_sizes),
+  size = lib_sizes / 1e6,
+  timepoint = metadata$timepoint,
+  isolate = metadata$isolate
+)
+
+ggplot(lib_df, aes(x = reorder(sample, size), y = size, fill = isolate)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~timepoint, scales = "free_x") +
+  labs(title = "Library Sizes by Isolate",
+       x = "Sample", y = "Million Reads",
+       fill = "Isolate") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+## Pathogen Load Analysis
+
+```{r qc-pathogen-load}
+host_reads <- colSums(counts_host)
+pathogen_reads <- colSums(counts_pathogen)
+
+pathogen_load_df <- data.frame(
+  sample = names(host_reads),
+  host = host_reads,
+  pathogen = pathogen_reads,
+  pathogen_pct = (pathogen_reads / (host_reads + pathogen_reads)) * 100,
+  timepoint = metadata$timepoint,
+  isolate = metadata$isolate,
+  aggressiveness = metadata$aggressiveness
+)
+
+# Plot pathogen load by isolate
+ggplot(pathogen_load_df[pathogen_load_df$timepoint != "NC",], 
+       aes(x = timepoint, y = pathogen_pct, fill = isolate)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2), alpha = 0.5) +
+  labs(title = "Pathogen Load by Isolate Over Time",
+       x = "Timepoint", y = "Pathogen Reads (%)") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+# Summary statistics by isolate
+cat("\n=== Pathogen Load Summary by Isolate ===\n")
+pathogen_summary <- pathogen_load_df %>%
+  filter(timepoint != "NC") %>%
+  group_by(isolate, timepoint) %>%
+  summarise(
+    mean_pct = mean(pathogen_pct),
+    sd_pct = sd(pathogen_pct),
+    n = n(),
+    .groups = "drop"
+  )
+print(pathogen_summary)
+```
+
+## Pathogen Load by Aggressiveness
+
+```{r qc-pathogen-aggressiveness}
+# Compare pathogen load between aggressive categories
+ggplot(pathogen_load_df[pathogen_load_df$aggressiveness != "Control",], 
+       aes(x = timepoint, y = pathogen_pct, fill = aggressiveness)) +
+  geom_boxplot() +
+  labs(title = "Pathogen Load by Aggressiveness Category",
+       x = "Timepoint", y = "Pathogen Reads (%)") +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal()
+
+# Statistical summary
+cat("\n=== Pathogen Load by Aggressiveness ===\n")
+agg_summary <- pathogen_load_df %>%
+  filter(aggressiveness != "Control") %>%
+  group_by(aggressiveness, timepoint) %>%
+  summarise(
+    mean_pct = mean(pathogen_pct),
+    sd_pct = sd(pathogen_pct),
+    n = n(),
+    .groups = "drop"
+  )
+print(agg_summary)
+```
+
+# HOST GENE ANALYSIS
+
+## Prepare DESeq2 Dataset - Host Genes
+
+```{r deseq2-host-setup}
+# STAR counts are integers; round() kept as a defensive no-op
+counts_host <- round(counts_host)
+
+# Filter low-expressed genes
+keep <- rowSums(counts_host >= 10) >= 3
+counts_host_filtered <- counts_host[keep, ]
+
+cat(sprintf("Genes after filtering: %d (from %d)\n", 
+            nrow(counts_host_filtered), nrow(counts_host)))
+
+# ===================================================================
+# CRITICAL: Remove NC samples to avoid isolate/timepoint confounding
+# NC samples are negative controls (no pathogen) and shouldn't be
+# compared as an "isolate" alongside real pathogen isolates
+# ===================================================================
+
+metadata_infected <- droplevels(metadata[metadata$timepoint != "NC", ])
+# droplevels() is critical: subsetting a factor in R retains ALL original levels
+# even for groups with zero observations. Without it, 'isolate' still carries a
+# "NC" level → model.matrix adds an all-zero dummy column → DESeq2 errors.
+counts_host_infected <- counts_host_filtered[, rownames(metadata_infected)]
+
+cat(sprintf("\nAnalyzing infected samples only: %d samples\n", ncol(counts_host_infected)))
+cat("Samples per isolate at infection timepoints:\n")
+print(table(metadata_infected$isolate, metadata_infected$timepoint))
+
+# Create DESeq2 dataset
+# Design: isolate + timepoint
+# NOTE: 'batch' (replicate number) is NESTED within isolate — rep 1 of WISS47
+# and rep 1 of Xtra7 are independent experiments, not shared processing batches.
+# Including batch alongside isolate in the same formula creates a rank-deficient
+# model matrix (they are linearly dependent). Drop batch here; the per-timepoint
+# subsets below also omit it for the same reason.
+dds_host <- DESeqDataSetFromMatrix(
+  countData = counts_host_infected,
+  colData = metadata_infected,
+  design = ~ isolate + timepoint
+)
+
+# Run DESeq2
+dds_host <- DESeq(dds_host)
+
+cat("\nDESeq2 analysis complete for host genes!\n")
+```
+
+## PCA - Host Response by Isolate
+
+```{r pca-host-isolate}
+# Variance stabilizing transformation
+vst_host <- vst(dds_host, blind = FALSE)
+
+# PCA plot colored by isolate
+pcaData <- plotPCA(vst_host, intgroup = c("timepoint", "isolate"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+ggplot(pcaData, aes(PC1, PC2, color = isolate, shape = timepoint)) +
+  geom_point(size = 4, alpha = 0.8) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("PCA: Host Gene Expression by Isolate") +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+## Host DEG Analysis: High vs Low Aggressive Isolates — All Timepoints
+
+```{r host-high-vs-low-all-timepoints}
+# ===================================================================
+# Compare host responses to Aggressive vs Low isolates at 24h, 48h, 96h
+# Produces one CSV per timepoint for downstream GO term analysis
+# ===================================================================
+
+timepoints <- c("24h", "48h", "96h")
+
+# Store results in a list for later use
+res_agg_list <- list()
+
+for (tp in timepoints) {
+  
+  cat("\n============================================================\n")
+  cat(sprintf("  Processing timepoint: %s\n", tp))
+  cat("============================================================\n")
+  
+  # Subset metadata to this timepoint
+  metadata_tp <- metadata_infected[metadata_infected$timepoint == tp, ]
+  dds_tp <- dds_host[, rownames(metadata_tp)]
+  
+  # Create simplified aggressiveness grouping
+  # High + Soy-specific → "Aggressive"; Low → "Low"; others → "Other"
+  colData(dds_tp)$agg_simple <- ifelse(
+    colData(dds_tp)$aggressiveness %in% c("High", "Soy-specific"), "Aggressive",
+    ifelse(colData(dds_tp)$aggressiveness == "Low", "Low", "Other")
+  )
+  colData(dds_tp)$agg_simple <- factor(colData(dds_tp)$agg_simple)
+  
+  # Show sample counts per group
+  cat("Samples per group:\n")
+  print(table(colData(dds_tp)$agg_simple))
+  
+  # Re-run DESeq2 with simplified design
+  # NOTE: Batch removed — nested within isolate at each single timepoint
+  design(dds_tp) <- ~ agg_simple
+  dds_tp <- DESeq(dds_tp)
+  
+  # Get results: Aggressive vs Low
+  res <- results(dds_tp, contrast = c("agg_simple", "Aggressive", "Low"), alpha = 0.05)
+  res <- res[order(res$padj), ]
+  
+  # Store in list
+  res_agg_list[[tp]] <- res
+  
+  # Print summary
+  n_sig   <- sum(res$padj < 0.05, na.rm = TRUE)
+  n_up    <- sum(res$padj < 0.05 & res$log2FoldChange > 0, na.rm = TRUE)
+  n_down  <- sum(res$padj < 0.05 & res$log2FoldChange < 0, na.rm = TRUE)
+  
+  cat(sprintf("\n--- Host Response: Aggressive vs Low (%s) ---\n", tp))
+  cat(sprintf("Significant DEGs (padj < 0.05): %d\n", n_sig))
+  cat(sprintf("  Upregulated in Aggressive:    %d\n", n_up))
+  cat(sprintf("  Downregulated in Aggressive:  %d\n", n_down))
+  
+  # Volcano plot
+  print(
+    EnhancedVolcano(res,
+                    lab = rownames(res),
+                    x = 'log2FoldChange',
+                    y = 'padj',
+                    title = paste0('Host: Aggressive vs Low (', tp, ')'),
+                    subtitle = 'Soybean genes',
+                    pCutoff = 0.05,
+                    FCcutoff = 1.0,
+                    pointSize = 2.0,
+                    labSize = 3.0,
+                    maxoverlapsConnectors = 20)
+  )
+}
+```
+
+## Export Host DEG Results for GO Analysis
+
+```{r export-host-high-vs-low-all-timepoints}
+# ===================================================================
+# Export one CSV per timepoint (significant DEGs, padj < 0.05)
+# Ready for GO term enrichment analysis
+# ===================================================================
+
+for (tp in timepoints) {
+  
+  res <- res_agg_list[[tp]]
+  
+  # Keep significant genes only (remove NAs, filter padj < 0.05)
+  sig <- res[!is.na(res$padj) & res$padj < 0.05, ]
+  sig_df <- as.data.frame(sig)
+  
+  # Build filename
+  filename <- paste0("Gm_host_aggressive_vs_low_DEGs_", tp, ".csv")
+  
+  write.csv(sig_df, filename)
+  
+  cat(sprintf("Exported %d DEGs → %s\n", nrow(sig_df), filename))
+}
+
+cat("\nAll 3 timepoint CSVs exported for GO analysis!\n")
+```
+
+## Host DEG Analysis: Individual Isolate Comparisons
+
+```{r host-SSPotter-specific}
+##example
+
+# Compare sunflower response to BN172 vs generalist isolates at 48h
+metadata_48h <- metadata_infected[metadata_infected$timepoint == "48h",]
+dds_48h <- dds_host[, rownames(metadata_48h)]
+
+# BN172 vs Low aggressive isolates
+colData(dds_48h)$iso_group <- ifelse(
+  colData(dds_48h)$isolate == "SSPotter", "SSPotter",
+  ifelse(colData(dds_48h)$aggressiveness == "Low", "Low", "Other")
+)
+colData(dds_48h)$iso_group <- factor(colData(dds_48h)$iso_group)
+
+# NOTE: Batch removed - nested within isolate at 48h
+design(dds_48h) <- ~ iso_group
+dds_48h <- DESeq(dds_48h)
+
+res_SSPotter <- results(dds_48h, contrast = c("iso_group", "SSPotter", "Low"), alpha = 0.05)
+res_SSPotter <- res_SSPotter[order(res_SSPotter$padj),]
+
+cat("\n=== Soybean Response: SSPotter (specialist) vs Low Aggressive (48h) ===\n")
+cat(sprintf("Significant DEGs: %d\n", sum(res_SSPotter$padj < 0.05, na.rm = TRUE)))
+cat(sprintf("Upregulated with SSPotter: %d\n", 
+            sum(res_SSPotter$padj < 0.05 & res_SSPotter$log2FoldChange > 0, na.rm = TRUE)))
+
+# Volcano plot
+EnhancedVolcano(res_SSPotter,
+                lab = rownames(res_SSPotter),
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = 'Soybean: SSPotter (specialist) vs Low Aggressive',
+                pCutoff = 0.05,
+                FCcutoff = 1.0)
+```
+
+# PATHOGEN GENE ANALYSIS
+
+## Prepare DESeq2 Dataset - Pathogen Genes
+
+```{r deseq2-pathogen-setup}
+# Round counts
+counts_pathogen <- round(counts_pathogen)
+
+# Note: metadata_infected was already created in host analysis section above
+# It excludes NC samples (negative controls without pathogen)
+counts_pathogen_infected <- counts_pathogen[, rownames(metadata_infected)]
+
+# Filter low-expressed genes
+keep_pathogen <- rowSums(counts_pathogen_infected >= 5) >= 3
+counts_pathogen_filtered <- counts_pathogen_infected[keep_pathogen, ]
+
+cat(sprintf("Pathogen genes after filtering: %d (from %d)\n", 
+            nrow(counts_pathogen_filtered), nrow(counts_pathogen)))
+
+# Create DESeq2 dataset
+# NOTE: batch is nested within isolate (same reason as host model above),
+# so the design uses isolate + timepoint only.
+dds_pathogen <- DESeqDataSetFromMatrix(
+  countData = counts_pathogen_filtered,
+  colData = metadata_infected,
+  design = ~ isolate + timepoint
+)
+
+# Run DESeq2
+dds_pathogen <- DESeq(dds_pathogen)
+
+cat("\nDESeq2 analysis complete for pathogen genes!\n")
+```
+
+## PCA - Pathogen Gene Expression by Isolate
+
+```{r pca-pathogen-isolate}
+vst_pathogen <- varianceStabilizingTransformation(dds_pathogen, blind = FALSE)
+
+pcaData_path <- plotPCA(vst_pathogen, intgroup = c("timepoint", "isolate"), returnData = TRUE)
+percentVar_path <- round(100 * attr(pcaData_path, "percentVar"))
+
+ggplot(pcaData_path, aes(PC1, PC2, color = isolate, shape = timepoint)) +
+  geom_point(size = 4, alpha = 0.8) +
+  xlab(paste0("PC1: ", percentVar_path[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar_path[2], "% variance")) +
+  ggtitle("PCA: Pathogen Gene Expression by Isolate") +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+## Pathogen DEG: High vs Low Aggressive Isolates — All Timepoints
+
+```{r pathogen-high-vs-low-all-timepoints}
+# ===================================================================
+# Compare pathogen gene expression: Aggressive vs Low at 24h, 48h, 96h
+# Produces one CSV per timepoint for downstream GO term analysis
+# ===================================================================
+
+timepoints <- c("24h", "48h", "96h")
+
+# Store results in a list for later use
+res_path_agg_list <- list()
+
+for (tp in timepoints) {
+  
+  cat("\n============================================================\n")
+  cat(sprintf("  Processing pathogen genes at timepoint: %s\n", tp))
+  cat("============================================================\n")
+  
+  # Subset metadata to this timepoint
+  metadata_path_tp <- metadata_infected[metadata_infected$timepoint == tp, ]
+  dds_path_tp <- dds_pathogen[, rownames(metadata_path_tp)]
+  
+  # Create simplified aggressiveness grouping
+  # High + Soy-specific → "Aggressive"; Low → "Low"; others → "Other"
+  colData(dds_path_tp)$agg_simple <- ifelse(
+    colData(dds_path_tp)$aggressiveness %in% c("High", "Soy-specific"), "Aggressive",
+    ifelse(colData(dds_path_tp)$aggressiveness == "Low", "Low", "Other")
+  )
+  colData(dds_path_tp)$agg_simple <- factor(colData(dds_path_tp)$agg_simple)
+  
+  # Show sample counts per group
+  cat("Samples per group:\n")
+  print(table(colData(dds_path_tp)$agg_simple))
+  
+  # Re-run DESeq2 with simplified design
+  # NOTE: Batch removed — nested within isolate at each single timepoint
+  design(dds_path_tp) <- ~ agg_simple
+  dds_path_tp <- DESeq(dds_path_tp)
+  
+  # Get results: Aggressive vs Low
+  res <- results(dds_path_tp, contrast = c("agg_simple", "Aggressive", "Low"), alpha = 0.05)
+  res <- res[order(res$padj), ]
+  
+  # Store in list
+  res_path_agg_list[[tp]] <- res
+  
+  # Print summary
+  n_sig   <- sum(res$padj < 0.05, na.rm = TRUE)
+  n_up    <- sum(res$padj < 0.05 & res$log2FoldChange > 0, na.rm = TRUE)
+  n_down  <- sum(res$padj < 0.05 & res$log2FoldChange < 0, na.rm = TRUE)
+  
+  cat(sprintf("\n--- Pathogen Genes: Aggressive vs Low (%s) ---\n", tp))
+  cat(sprintf("Significant DEGs (padj < 0.05): %d\n", n_sig))
+  cat(sprintf("  Upregulated in Aggressive:    %d\n", n_up))
+  cat(sprintf("  Downregulated in Aggressive:  %d\n", n_down))
+  
+  # Volcano plot
+  print(
+    EnhancedVolcano(res,
+                    lab = rownames(res),
+                    x = 'log2FoldChange',
+                    y = 'padj',
+                    title = paste0('Pathogen: Aggressive vs Low (', tp, ')'),
+                    subtitle = 'S. sclerotiorum genes',
+                    pCutoff = 0.05,
+                    FCcutoff = 1.0,
+                    pointSize = 2.0,
+                    labSize = 3.0)
+  )
+}
+```
+
+## Export Pathogen DEG Results for GO Analysis
+
+```{r export-pathogen-high-vs-low-all-timepoints}
+# ===================================================================
+# Export one CSV per timepoint (significant DEGs, padj < 0.05)
+# Ready for GO term enrichment analysis
+# ===================================================================
+
+for (tp in timepoints) {
+  
+  res <- res_path_agg_list[[tp]]
+  
+  # Keep significant genes only (remove NAs, filter padj < 0.05)
+  sig <- res[!is.na(res$padj) & res$padj < 0.05, ]
+  sig_df <- as.data.frame(sig)
+  
+  # Build filename
+  filename <- paste0("Gm_pathogen_aggressive_vs_low_DEGs_", tp, ".csv")
+  
+  write.csv(sig_df, filename)
+  
+  cat(sprintf("Exported %d DEGs → %s\n", nrow(sig_df), filename))
+}
+
+cat("\nAll 3 pathogen timepoint CSVs exported for GO analysis!\n")
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
